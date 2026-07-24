@@ -1,0 +1,2 @@
+simc/*.exe filter=lfs diff=lfs merge=lfs -text
+simc/*.dll filter=lfs diff=lfs merge=lfs -text
