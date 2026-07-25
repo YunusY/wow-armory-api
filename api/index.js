@@ -1,3 +1,6 @@
+const clientId = process.env.BLIZZARD_CLIENT_ID;
+const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
+
 // Hardcoded Data
 const boeItems = [
     "primal_spark_pauldrons",
@@ -8,24 +11,8 @@ const boeItems = [
     "raging_storm_sash",
     "fading_dawn_sabatons",
     "breastplate_of_the_final defense"
+    // Add your Midnight tier BoEs here if needed!
 ];
-
-const stat_bonus_ids = {
-    "crit haste": "32:36", "crit mastery": "32:49", "crit versa": "32:40",
-    "haste crit": "36:32", "haste mastery": "36:49", "haster versa": "36:40",
-    "mastery crit": "49:32", "mastery haste": "49:36", "mastery versa": "49:40",
-    "versa crit": "40:32", "versa haste": "40:36", "versa mastery": "40:49"
-};
-
-const spec_stat_choices = {
-    "mage-frost": "crit mastery", "paladin-retribution": "crit mastery",
-    "warrior-protection": "crit haste", "druid-guardian": "haste mastery",
-    "deathknight-unholy": "crit mastery", "hunter-marksmanship": "crit mastery",
-    "priest-shadow": "mastery haste", "rogue-subtlety": "crit mastery",
-    "shaman-elemental": "crit mastery", "warlock-demonology": "crit haste",
-    "monk-windwalker": "haste crit", "evoker-augmentation": "crit haste",
-    "demonhunter-devourer": "haste mastery"
-};
 
 const guild_ids = {
     "echo": "1047044",
@@ -38,16 +25,44 @@ const headers = {
     "Accept": "application/json"
 };
 
+// Blizzard Token Management
+let blizzardToken = null;
+let tokenExpiry = 0;
+
+async function getBlizzardToken() {
+    if (blizzardToken && Date.now() < tokenExpiry) return blizzardToken;
+    if (!clientId || !clientSecret) {
+        throw new Error("Missing Blizzard API credentials. Please set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel.");
+    }
+    
+    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const response = await fetch('https://oauth.battle.net/token', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials'
+    });
+    
+    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API.");
+    
+    const data = await response.json();
+    blizzardToken = data.access_token;
+    // Buffer expiration by 60 seconds to ensure we don't use a token as it expires
+    tokenExpiry = Date.now() + (data.expires_in - 60) * 1000; 
+    
+    return blizzardToken;
+}
+
 // Helper 1: Get recent pull ID
 async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
     const params = new URLSearchParams({
         raid, boss, difficulty, region, realm, guild
     });
-    // Only append period if it exists and isn't empty
     if (period) params.append('period', period);
 
     const url = `https://raider.io/api/v1/live-tracking/guild/boss-pulls?${params.toString()}`;
-    
     const response = await fetch(url, { headers });
     
     if (!response.ok) {
@@ -68,7 +83,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
     });
 
     const url = `https://raider.io/api/v1/live-tracking/guild/raid-comps?${params.toString()}`;
-
     const response = await fetch(url, { headers });
     
     if (!response.ok) {
@@ -77,24 +91,76 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
     }
     
     const data = await response.json();
-    
     if (!data.details || !data.details.roster) {
         throw new Error('Roster data is missing from Raider.IO response.');
     }
 
-    let combinedSimcText = "";
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
-
-    // Loop through players from index 0 to 19 (Max 20 players)
+    
+    // --- STEP A: IDENTIFY PLAYERS WITH BoE ITEMS ---
+    const playersToFetch = [];
     for (let i = 0; i < 20; i++) {
-        // Break early if the roster has fewer than 20 players
+        if (!data.details.roster[i]) break;
+        const p = data.details.roster[i].character;
+        let hasBoe = false;
+        
+        const items = p.items.items;
+        for (const slot of slots) {
+            if (items[slot]) {
+                const itemName = items[slot].name.replace(/'/g, "").replace(/ /g, "_").toLowerCase();
+                if (boeItems.includes(itemName)) {
+                    hasBoe = true;
+                    break;
+                }
+            }
+        }
+        
+        if (hasBoe) {
+            // RIO usually stores realm as an object { slug: '...' }, fallback to standard realm if not
+            const playerRealm = (p.realm && p.realm.slug) ? p.realm.slug : realm;
+            playersToFetch.push({ index: i, name: p.name, realm: playerRealm });
+        }
+    }
+
+    // --- STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY ---
+    const armoryData = {};
+    if (playersToFetch.length > 0) {
+        const token = await getBlizzardToken();
+        
+        await Promise.all(playersToFetch.map(async (player) => {
+            try {
+                const realmSlug = encodeURIComponent(player.realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
+                const nameSlug = encodeURIComponent(player.name.toLowerCase());
+                
+                const bUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${region}&locale=en_US`;
+                const armoryResponse = await fetch(bUrl, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (armoryResponse.ok) {
+                    const eq = await armoryResponse.json();
+                    if (eq.equipped_items) {
+                        armoryData[player.index] = eq.equipped_items;
+                    }
+                }
+            } catch (err) {
+                console.error(`Failed to fetch armory for ${player.name}:`, err);
+                // Fails gracefully; if Armory drops the call, we just fallback to RIO stats below
+            }
+        }));
+    }
+
+    // --- STEP C: BUILD MASTER SIMC STRING ---
+    let combinedSimcText = "";
+
+    for (let i = 0; i < 20; i++) {
         if (!data.details.roster[i]) break; 
 
         const p = data.details.roster[i].character;
 
         // 1. ACTOR DECLARATION
         let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\n`;
-        simc += "level=90\n";
+        simc += "level=90\n"; // Note: Might need to bump this to 90 or 100 for Midnight!
         simc += `race=${p.race.slug.replaceAll("-", "_")}\n`;
         simc += `spec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\n`;
         simc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
@@ -117,20 +183,24 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
                 if (item.enchant) simc += `,enchant_id=${item.enchant}`;
                 if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
-                if (item.bonuses && item.bonuses.length > 0) simc += `,bonus_id=${item.bonuses.join("/")}`;
+                
+                // Base bonuses from Raider.IO
+                let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
 
-                if (boeItems.includes(itemName.toLowerCase())) {
-                    const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
-                    const missing_stat = stat_bonus_ids[spec_stat_choices[classspec]];
-                    if (missing_stat) {
-                        simc += `/${missing_stat}`;
+                // Overwrite with Blizzard Armory bonuses if it is a BoE
+                if (boeItems.includes(itemName.toLowerCase()) && armoryData[i]) {
+                    const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
+                    if (armoryItem && armoryItem.bonus_list) {
+                        bonusStr = armoryItem.bonus_list.join("/");
                     }
                 }
+
+                if (bonusStr) simc += `,bonus_id=${bonusStr}`;
                 simc += "\n";
             }
         }
         
-        // Append the current player to the master string, with a couple of linebreaks between players
+        // Append current player to master string
         combinedSimcText += simc + "\n\n";
     }
     
@@ -142,7 +212,6 @@ module.exports = async function handler(req, res) {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method Not Allowed' });
 
     try {
-        // Safe parameter extraction: Strips literal "undefined" or "null" strings
         const clean = (val) => (val === 'undefined' || val === 'null' || val === '') ? undefined : val;
 
         let raid = clean(req.query.raid);
@@ -154,7 +223,6 @@ module.exports = async function handler(req, res) {
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
 
-        // Validation for missing required parameters
         const missingParams = [];
         if (!raid) missingParams.push("raid");
         if (!boss) missingParams.push("boss");
@@ -169,7 +237,6 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        // Look up the Guild ID strictly from the dictionary
         const guild_id = guild_ids[guild.toLowerCase()];
         if (!guild_id) {
             return res.status(400).json({ 
@@ -177,21 +244,17 @@ module.exports = async function handler(req, res) {
             });
         }
 
-        // Fetch recent pull if no pullId is passed
         if (!pullId) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
         }
 
-        // Generate the combined plain-text profile of all 20 SIMCs
         const simcText = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
 
-        // Return the final payload as raw text so it looks just like a standard SimC export
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.status(200).send(simcText);
 
     } catch (error) {
         console.error("Function Error: ", error.message);
-        // Expose the error message directly to the front-end
         return res.status(500).json({ error: error.message });
     }
 };
