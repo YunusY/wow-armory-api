@@ -193,10 +193,10 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 
             }
         }
-        combinedSimcText += simc + "\n\n";
+        combinedSimcText +=  simc + "\n\n";
     }
     
-    return combinedSimcText.trim();
+    return `secondstats+\n+combinedSimcText`.trim();
 }
 
 module.exports = async function handler(req, res) {
