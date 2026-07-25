@@ -10,15 +10,8 @@ const boeItems = [
     "nullstriders_boots",
     "raging_storm_sash",
     "fading_dawn_sabatons",
-    "breastplate_of_the_final_defense" // Fixed the space here
+    "breastplate_of_the_final_defense"
 ];
-
-const stat_bonus_ids = {
-    "crit haste": "32:36", "crit mastery": "32:49", "crit versa": "32:40",
-    "haste crit": "36:32", "haste mastery": "36:49", "haste versa": "36:40",
-    "mastery crit": "49:32", "mastery haste": "49:36", "mastery versa": "49:40",
-    "versa crit": "40:32", "versa haste": "40:36", "versa mastery": "40:49"
-};
 
 const guild_ids = {
     "echo": "1047044",
@@ -36,7 +29,7 @@ let tokenExpiry = 0;
 async function getBlizzardToken() {
     if (blizzardToken && Date.now() < tokenExpiry) return blizzardToken;
     if (!clientId || !clientSecret) {
-        throw new Error("Missing Blizzard API credentials. Please set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel.");
+        throw new Error("Missing Blizzard API credentials. Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel & REDEPLOY.");
     }
     
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
@@ -49,7 +42,7 @@ async function getBlizzardToken() {
         body: 'grant_type=client_credentials'
     });
     
-    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API.");
+    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API. Check Client ID / Secret.");
     
     const data = await response.json();
     blizzardToken = data.access_token;
@@ -109,27 +102,36 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
     }
 
-    // --- STEP B: FETCH BLIZZARD ARMORY ---
+    // --- STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY ---
     const armoryData = {};
+    const armoryErrors = {};
+
     if (playersToFetch.length > 0) {
-        const token = await getBlizzardToken();
-        
-        await Promise.all(playersToFetch.map(async (player) => {
-            try {
-                const realmSlug = encodeURIComponent(player.realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
-                const nameSlug = encodeURIComponent(player.name.toLowerCase());
-                
-                const bUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${region}&locale=en_US`;
-                const armoryResponse = await fetch(bUrl, { headers: { 'Authorization': `Bearer ${token}` } });
-                
-                if (armoryResponse.ok) {
-                    const eq = await armoryResponse.json();
-                    if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
+        try {
+            const token = await getBlizzardToken();
+            
+            await Promise.all(playersToFetch.map(async (player) => {
+                try {
+                    const realmSlug = encodeURIComponent(player.realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
+                    const nameSlug = encodeURIComponent(player.name.toLowerCase());
+                    
+                    const bUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${region}&locale=en_US`;
+                    const armoryResponse = await fetch(bUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+                    
+                    if (armoryResponse.ok) {
+                        const eq = await armoryResponse.json();
+                        if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
+                    } else {
+                        armoryErrors[player.index] = `Blizzard API returned HTTP ${armoryResponse.status} for character ${player.name}-${realmSlug}`;
+                    }
+                } catch (err) {
+                    armoryErrors[player.index] = `Fetch error: ${err.message}`;
                 }
-            } catch (err) {
-                console.error(`Armory error for ${player.name}:`, err);
-            }
-        }));
+            }));
+        } catch (tokenErr) {
+            // Token error affects all players
+            playersToFetch.forEach(p => armoryErrors[p.index] = tokenErr.message);
+        }
     }
 
     // --- STEP C: BUILD MASTER SIMC STRING ---
@@ -141,12 +143,21 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
         let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\nlevel=90\nrace=${p.race.slug.replaceAll("-", "_")}\nspec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\ntalents=${p.talentLoadout.exportLoadoutText}\n`;
         const items = p.items.items;
-        let secondstats = "inc\n";
+
         for (const slot of slots) {
             const item = items[slot];
             if (item) {
                 const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
                 const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
+
+                // Print informative status note if BoE is detected
+                if (isBoe) {
+                    if (armoryErrors[i]) {
+                        simc += `# ARMORY_INFO: Failed to fetch Armory -> ${armoryErrors[i]}\n`;
+                    } else if (!armoryData[i]) {
+                        simc += `# ARMORY_INFO: Player data missing from Armory.\n`;
+                    }
+                }
 
                 if (slot === "mainhand" || slot === "offhand") {
                     simc += `${slot === "mainhand" ? "main_hand" : "off_hand"}=${itemName},id=${item.item_id}`;
@@ -158,43 +169,36 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
                 
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
+                if (bonusStr) simc += `,bonus_id=${bonusStr}`;
 
-                // Look up real stats from Armory to append to the bonus list
+                // Parse EXACT stats from the Armory and use SimC's "crafted_stats" parameter
                 if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
-                    console.log("My object:", armoryItem.stats);
-                    secondstats+=`\n${armoryItem.stats}\n`;
                     if (armoryItem && armoryItem.stats) {
-                        // Filter out secondary stats
                         const secStats = armoryItem.stats.filter(s =>
                             ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type.type)
                         );
                         
-                        // Sort descending so the stat with the highest allocation is first (Major vs Minor stat)
                         secStats.sort((a, b) => b.value - a.value);
                         
-                        if (secStats.length >= 2) {
-                            const statMap = { "CRITICAL_STRIKE": "crit", "HASTE": "haste", "MASTERY": "mastery", "VERSATILITY": "versa" };
-                            const stat1 = statMap[secStats[0].type.type];
-                            const stat2 = statMap[secStats[1].type.type];
+                        if (secStats.length > 0) {
+                            const statMap = { 
+                                "CRITICAL_STRIKE": "32", 
+                                "HASTE": "36", 
+                                "VERSATILITY": "40",
+                                "MASTERY": "49" 
+                            };
                             
-                            const statKey = `${stat1} ${stat2}`;
-                            const missingBonus = stat_bonus_ids[statKey];
-                            
-                            // Append the custom stat ID (e.g., /32:36) to the end of the list
-                            if (missingBonus) {
-                                bonusStr += (bonusStr ? "/" : "") + missingBonus;
-                            }
+                            const statTokens = secStats.map(s => statMap[s.type.type]);
+                            simc += `,crafted_stats=${statTokens.join("/")}`;
                         }
                     }
                 }
 
-                if (bonusStr) simc += `,bonus_id=${bonusStr}`;
                 simc += "\n";
-                
             }
         }
-        combinedSimcText +=  secondstats +simc + "\n\n";
+        combinedSimcText += simc + "\n\n";
     }
     
     return combinedSimcText.trim();
