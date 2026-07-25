@@ -61,8 +61,8 @@ async function getRecentPullId(raid, boss, difficulty, region, realm, guild, per
     return data.pulls[data.pulls.length - 1].details.id;
 }
 
-// Helper 2: Get SimC Data
-async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId, playerIndex) {
+// Helper 2: Get SimC Data for All 20 Players
+async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId) {
     const params = new URLSearchParams({
         raid, difficulty, id: pullId, guild_id, region, realm, boss, guild
     });
@@ -78,51 +78,63 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
     
     const data = await response.json();
     
-    if (!data.details || !data.details.roster || !data.details.roster[playerIndex]) {
-        throw new Error('Player index out of bounds or roster data missing.');
+    if (!data.details || !data.details.roster) {
+        throw new Error('Roster data is missing from Raider.IO response.');
     }
 
-    const p = data.details.roster[playerIndex].character;
-
-    // 1. ACTOR DECLARATION
-    let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\n`;
-    simc += "level=90\n";
-    simc += `race=${p.race.slug.replaceAll("-", "_")}\n`;
-    simc += `spec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\n`;
-    simc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
-
-    // 2. GEAR
-    const items = p.items.items;
+    const simcResults = {};
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
 
-    for (const slot of slots) {
-        const item = items[slot];
-        if (item) {
-            const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
-            
-            if (slot === "mainhand") {
-                simc += `main_hand=${itemName},id=${item.item_id}`;
-            } else if (slot === "offhand") {
-                simc += `off_hand=${itemName},id=${item.item_id}`;
-            } else {
-                simc += `${slot}=${itemName},id=${item.item_id}`;
-            }
+    // Loop through players from index 0 to 19 (Max 20 players)
+    for (let i = 0; i < 20; i++) {
+        // Break early if the roster has fewer than 20 players
+        if (!data.details.roster[i]) break; 
 
-            if (item.enchant) simc += `,enchant_id=${item.enchant}`;
-            if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
-            if (item.bonuses && item.bonuses.length > 0) simc += `,bonus_id=${item.bonuses.join("/")}`;
+        const p = data.details.roster[i].character;
 
-            if (boeItems.includes(itemName.toLowerCase())) {
-                const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
-                const missing_stat = stat_bonus_ids[spec_stat_choices[classspec]];
-                if (missing_stat) {
-                    simc += `/${missing_stat}`;
+        // 1. ACTOR DECLARATION
+        let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\n`;
+        simc += "level=90\n";
+        simc += `race=${p.race.slug.replaceAll("-", "_")}\n`;
+        simc += `spec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\n`;
+        simc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
+
+        // 2. GEAR
+        const items = p.items.items;
+
+        for (const slot of slots) {
+            const item = items[slot];
+            if (item) {
+                const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
+                
+                if (slot === "mainhand") {
+                    simc += `main_hand=${itemName},id=${item.item_id}`;
+                } else if (slot === "offhand") {
+                    simc += `off_hand=${itemName},id=${item.item_id}`;
+                } else {
+                    simc += `${slot}=${itemName},id=${item.item_id}`;
                 }
+
+                if (item.enchant) simc += `,enchant_id=${item.enchant}`;
+                if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
+                if (item.bonuses && item.bonuses.length > 0) simc += `,bonus_id=${item.bonuses.join("/")}`;
+
+                if (boeItems.includes(itemName.toLowerCase())) {
+                    const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
+                    const missing_stat = stat_bonus_ids[spec_stat_choices[classspec]];
+                    if (missing_stat) {
+                        simc += `/${missing_stat}`;
+                    }
+                }
+                simc += "\n";
             }
-            simc += "\n";
         }
+        
+        // Save the generated text into the JSON object with the index as the key
+        simcResults[i] = simc;
     }
-    return simc;
+    
+    return simcResults;
 }
 
 // VERCEL NATIVE HANDLER
@@ -139,17 +151,10 @@ module.exports = async function handler(req, res) {
         let region = clean(req.query.region);
         let realm = clean(req.query.realm);
         let guild = clean(req.query.guild);
-        let guild_id = clean(req.query.guild_id);
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
-        let playerIndex = clean(req.query.playerIndex);
 
-        // Automatically assign guild_id if it's echo or liquid
-        if (!guild_id && guild) {
-            guild_id = guild_ids[guild.toLowerCase()];
-        }
-
-        // Validation for missing required parameters
+        // Validation for missing required parameters (guild_id removed)
         const missingParams = [];
         if (!raid) missingParams.push("raid");
         if (!boss) missingParams.push("boss");
@@ -157,12 +162,18 @@ module.exports = async function handler(req, res) {
         if (!region) missingParams.push("region");
         if (!realm) missingParams.push("realm");
         if (!guild) missingParams.push("guild");
-        if (!guild_id) missingParams.push("guild_id");
-        if (playerIndex === undefined) missingParams.push("playerIndex");
 
         if (missingParams.length > 0) {
             return res.status(400).json({ 
                 error: `Missing required query parameters: ${missingParams.join(", ")}` 
+            });
+        }
+
+        // Look up the Guild ID strictly from the dictionary
+        const guild_id = guild_ids[guild.toLowerCase()];
+        if (!guild_id) {
+            return res.status(400).json({ 
+                error: `Guild '${guild}' is not found in the predefined guild_ids. Supported guilds are: ${Object.keys(guild_ids).join(", ")}` 
             });
         }
 
@@ -171,12 +182,12 @@ module.exports = async function handler(req, res) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
         }
 
-        // Generate SIMC profile
-        const simcText = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId, parseInt(playerIndex, 10));
+        // Generate JSON profile of all 20 SIMCs
+        const simcData = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
 
-        // Return the SIMC text format
-        res.setHeader('Content-Type', 'text/plain');
-        return res.status(200).send(simcText);
+        // Return the final payload as JSON
+        res.setHeader('Content-Type', 'application/json');
+        return res.status(200).json(simcData);
 
     } catch (error) {
         console.error("Function Error: ", error.message);
