@@ -1,11 +1,7 @@
-const express = require('express');
-const app = express();
-const port = 3000;
-const guild_ids [
-  "echo": "1047044"
+const guild_ids = {
+  "echo": "1047044",
   "liquid": "1712677"
-]
-// Hardcoded Data
+}// Hardcoded Data
 const boeItems = [
     "primal_spark_pauldrons",
     "power_stance_breeches",
@@ -19,7 +15,7 @@ const boeItems = [
 
 const stat_bonus_ids = {
     "crit haste": "32:36", "crit mastery": "32:49", "crit versa": "32:40",
-    "haste crit": "36:32", "haste mastery": "36:49", "haster versa": "36:40", // Note: "haster versa" from your original code
+    "haste crit": "36:32", "haste mastery": "36:49", "haster versa": "36:40",
     "mastery crit": "49:32", "mastery haste": "49:36", "mastery versa": "49:40",
     "versa crit": "40:32", "versa haste": "40:36", "versa mastery": "40:49"
 };
@@ -45,15 +41,12 @@ async function getRecentPullId(raid, boss, difficulty, region, realm, guild, per
         `&guild=${encodeURIComponent(guild)}` +
         `&period=${encodeURIComponent(period)}`;
 
-    console.log(`Fetching Pull IDs: ${url}`);
     const response = await fetch(url);
-    
-    if (!response.ok) throw new Error(`Failed to fetch pull IDs: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Raider.IO Boss-Pulls Error: HTTP ${response.status}`);
     
     const data = await response.json();
-    if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found');
+    if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found on Raider.IO for this period.');
     
-    // Returns the most recent pull ID
     return data.pulls[data.pulls.length - 1].details.id;
 }
 
@@ -69,15 +62,13 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         `&boss=${encodeURIComponent(boss)}` +
         `&guild=${encodeURIComponent(guild)}`;
 
-    console.log(`Fetching Raid Comp: ${url}`);
     const response = await fetch(url);
-    
-    if (!response.ok) throw new Error(`Failed to fetch raid comps: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Raider.IO Raid-Comps Error: HTTP ${response.status}`);
     
     const data = await response.json();
     
     if (!data.details || !data.details.roster || !data.details.roster[playerIndex]) {
-        throw new Error('Player index out of bounds or roster data missing');
+        throw new Error('Player index out of bounds or roster data missing.');
     }
 
     const p = data.details.roster[playerIndex].character;
@@ -123,8 +114,13 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
     return simc;
 }
 
-// API Endpoint
-app.get('/api/get-simc', async (req, res) => {
+// VERCEL NATIVE HANDLER
+module.exports = async function handler(req, res) {
+    // Only allow GET requests
+    if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
     try {
         // Extract query parameters
         const { raid, boss, difficulty, region, realm, guild, guild_id, period, playerIndex } = req.query;
@@ -135,7 +131,7 @@ app.get('/api/get-simc', async (req, res) => {
             return res.status(400).json({ error: "Missing required query parameters." });
         }
 
-        // If pullId isn't provided, fetch the most recent one automatically
+        // Fetch recent pull if no pullId is passed
         if (!pullId) {
             if (!period) return res.status(400).json({ error: "Provide either pullId or period to fetch the recent pull." });
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
@@ -146,15 +142,10 @@ app.get('/api/get-simc', async (req, res) => {
 
         // Return the SIMC text format
         res.setHeader('Content-Type', 'text/plain');
-        res.send(simcText);
+        return res.status(200).send(simcText);
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
+        console.error("Function Error: ", error.message);
+        return res.status(500).json({ error: error.message });
     }
-});
-
-// Start the server
-app.listen(port, () => {
-    console.log(`SimC API Server running at http://localhost:${port}`);
-});
+};
