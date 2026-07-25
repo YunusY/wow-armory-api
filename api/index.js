@@ -1,4 +1,9 @@
 const https = require('https');
+const dns = require('dns');
+
+if (dns && dns.setDefaultResultOrder) {
+    try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
+}
 
 const clientId = (process.env.BLIZZARD_CLIENT_ID || '').trim();
 const clientSecret = (process.env.BLIZZARD_CLIENT_SECRET || '').trim();
@@ -15,24 +20,6 @@ const boeItems = [
     "breastplate_of_the_final_defense"
 ];
 
-// SimC crafted_stats tokens (32=Crit, 36=Haste, 40=Vers, 49=Mastery)
-const stat_bonus_ids = { 
-    "crit haste": "32/36", "crit mastery": "32/49", "crit versa": "32/40", 
-    "haste crit": "36/32", "haste mastery": "36/49", "haste versa": "36/40", 
-    "mastery crit": "49/32", "mastery haste": "49/36", "mastery versa": "49/40", 
-    "versa crit": "40/32", "versa haste": "40/36", "versa mastery": "40/49" 
-};
-
-const spec_stat_choices = {
-    "mage-frost": "crit mastery", "paladin-retribution": "crit mastery",
-    "warrior-protection": "crit haste", "druid-guardian": "haste mastery",
-    "deathknight-unholy": "crit mastery", "hunter-marksmanship": "crit mastery",
-    "priest-shadow": "mastery haste", "rogue-subtlety": "crit mastery",
-    "shaman-elemental": "crit mastery", "warlock-demonology": "crit haste",
-    "monk-windwalker": "haste crit", "evoker-augmentation": "crit haste",
-    "demonhunter-devourer": "haste mastery"
-};
-
 const guild_ids = {
     "echo": "1047044",
     "liquid": "1712677"
@@ -46,25 +33,28 @@ const headers = {
 let blizzardToken = null;
 let tokenExpiry = 0;
 
-// Fetch OAuth token cleanly using native HTTPS
-async function getBlizzardToken(region = 'eu') {
-    if (blizzardToken && Date.now() < tokenExpiry) return blizzardToken;
-    if (!clientId || !clientSecret) return null;
-    
-    const cleanRegion = (region || 'eu').toLowerCase();
-    const tokenHost = ['eu', 'us', 'kr', 'tw'].includes(cleanRegion) ? `${cleanRegion}.battle.net` : 'oauth.battle.net';
-    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    const bodyData = 'grant_type=client_credentials';
-
+// Step 1: Get OAuth Token using native IPv4 socket
+function getBlizzardToken(region = 'eu') {
     return new Promise((resolve) => {
+        if (blizzardToken && Date.now() < tokenExpiry) {
+            return resolve(blizzardToken);
+        }
+        if (!clientId || !clientSecret) return resolve(null);
+
+        const cleanRegion = (region || 'eu').toLowerCase();
+        const tokenHost = ['eu', 'us', 'kr', 'tw'].includes(cleanRegion) ? `${cleanRegion}.battle.net` : 'oauth.battle.net';
+        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        const postData = 'grant_type=client_credentials';
+
         const req = https.request({
             hostname: tokenHost,
             path: '/oauth/token',
             method: 'POST',
+            family: 4, // IPv4 socket override
             headers: {
                 'Authorization': `Basic ${auth}`,
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(bodyData),
+                'Content-Length': Buffer.byteLength(postData),
                 'User-Agent': headers['User-Agent']
             }
         }, (res) => {
@@ -81,10 +71,75 @@ async function getBlizzardToken(region = 'eu') {
                 } else { resolve(null); }
             });
         });
+
         req.on('error', () => resolve(null));
-        req.write(bodyData);
+        req.write(postData);
         req.end();
     });
+}
+
+// Step 2: Fetch Equipment using native IPv4 socket
+function fetchArmoryEquipment(token, region, realm, character) {
+    return new Promise((resolve) => {
+        if (!token) return resolve(null);
+
+        const cleanRegion = (region || 'eu').toLowerCase();
+        const realmSlug = encodeURIComponent(realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
+        const nameSlug = encodeURIComponent(character.toLowerCase());
+
+        const req = https.request({
+            hostname: `${cleanRegion}.api.blizzard.com`,
+            path: `/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${cleanRegion}&locale=en_US`,
+            method: 'GET',
+            family: 4, // IPv4 socket override
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': headers['User-Agent']
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        const parsed = JSON.parse(data);
+                        resolve(parsed.equipped_items || null);
+                    } catch (e) { resolve(null); }
+                } else { resolve(null); }
+            });
+        });
+
+        req.on('error', () => resolve(null));
+        req.end();
+    });
+}
+
+// Step 3: Extract & Sort Secondary Stats (Crit=32, Haste=36, Vers=40, Mastery=49)
+function extractCraftedStats(armoryItem) {
+    if (!armoryItem || !armoryItem.stats) return null;
+
+    const parsedStats = [];
+    for (const s of armoryItem.stats) {
+        const typeStr = `${s.type?.type || ''} ${s.type?.name || ''}`.toUpperCase();
+        let statId = null;
+
+        if (typeStr.includes("CRIT")) statId = "32";
+        else if (typeStr.includes("HASTE")) statId = "36";
+        else if (typeStr.includes("VERSATIL") || typeStr.includes("VERSA")) statId = "40";
+        else if (typeStr.includes("MASTERY")) statId = "49";
+
+        if (statId) {
+            parsedStats.push({ id: statId, value: s.value || 0 });
+        }
+    }
+
+    // Sort descending by value (Major stat first)
+    parsedStats.sort((a, b) => b.value - a.value);
+
+    if (parsedStats.length > 0) {
+        return parsedStats.map(s => s.id).join("/");
+    }
+    return null;
 }
 
 async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
@@ -114,7 +169,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
     
-    // --- STEP A: IDENTIFY PLAYERS WITH BoE ITEMS ---
+    // STEP A: IDENTIFY PLAYERS WITH BoE ITEMS
     const playersToFetch = [];
     for (let i = 0; i < 20; i++) {
         if (!data.details.roster[i]) break;
@@ -138,32 +193,23 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
     }
 
-    // --- STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY ---
+    // STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY
     const armoryData = {};
-
     if (playersToFetch.length > 0) {
         const cleanRegion = (region || "eu").toLowerCase();
         const token = await getBlizzardToken(cleanRegion);
         
         if (token) {
             await Promise.all(playersToFetch.map(async (player) => {
-                try {
-                    const realmSlug = encodeURIComponent(player.realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
-                    const nameSlug = encodeURIComponent(player.name.toLowerCase());
-                    
-                    const bUrl = `https://${cleanRegion}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${cleanRegion}&locale=en_US`;
-                    const armoryResponse = await fetch(bUrl, { headers: { ...headers, 'Authorization': `Bearer ${token}` } });
-                    
-                    if (armoryResponse.ok) {
-                        const eq = await armoryResponse.json();
-                        if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
-                    }
-                } catch (err) {}
+                const equipment = await fetchArmoryEquipment(token, cleanRegion, player.realm, player.name);
+                if (equipment) {
+                    armoryData[player.index] = equipment;
+                }
             }));
         }
     }
 
-    // --- STEP C: BUILD MASTER SIMC STRING ---
+    // STEP C: BUILD MASTER SIMC TEXT
     let combinedSimcText = "";
 
     for (let i = 0; i < 20; i++) {
@@ -191,48 +237,17 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
                 if (bonusStr) simc += `,bonus_id=${bonusStr}`;
 
-                // Handle BoE Crafted Stats (Armory First -> Spec Choice Second)
-                if (isBoe) {
-                    let craftedStatsStr = null;
+                // Parse EXACT stats directly from Armory
+                if (isBoe && armoryData[i]) {
+                    const baseSlot = slot.replace(/\d+$/, "").toUpperCase();
+                    const armoryItem = armoryData[i].find(ai => 
+                        String(ai.item?.id) === String(item.item_id) || 
+                        ai.slot?.type === baseSlot
+                    );
 
-                    // 1. Try Blizzard Armory
-                    if (armoryData[i]) {
-                        const baseSlot = slot.replace(/\d+$/, "").toUpperCase();
-                        const armoryItem = armoryData[i].find(ai => 
-                            String(ai.item?.id) === String(item.item_id) || 
-                            ai.slot?.type === baseSlot
-                        );
-
-                        if (armoryItem && armoryItem.stats) {
-                            const secStats = armoryItem.stats.filter(s =>
-                                ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type?.type)
-                            );
-                            
-                            secStats.sort((a, b) => b.value - a.value);
-                            
-                            if (secStats.length > 0) {
-                                const statMap = { 
-                                    "CRITICAL_STRIKE": "32", 
-                                    "HASTE": "36", 
-                                    "VERSATILITY": "40",
-                                    "MASTERY": "49" 
-                                };
-                                craftedStatsStr = secStats.map(s => statMap[s.type.type]).join("/");
-                            }
-                        }
-                    }
-
-                    // 2. Fallback to Spec Choice if Armory is unavailable
-                    if (!craftedStatsStr) {
-                        const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
-                        const statChoice = spec_stat_choices[classspec];
-                        if (statChoice && stat_bonus_ids[statChoice]) {
-                            craftedStatsStr = stat_bonus_ids[statChoice];
-                        }
-                    }
-
-                    if (craftedStatsStr) {
-                        simc += `,crafted_stats=${craftedStatsStr}`;
+                    const craftedStats = extractCraftedStats(armoryItem);
+                    if (craftedStats) {
+                        simc += `,crafted_stats=${craftedStats}`;
                     }
                 }
 
@@ -259,7 +274,26 @@ module.exports = async function handler(req, res) {
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
 
+        const missingParams = [];
+        if (!raid) missingParams.push("raid");
+        if (!boss) missingParams.push("boss");
+        if (!difficulty) missingParams.push("difficulty");
+        if (!region) missingParams.push("region");
+        if (!realm) missingParams.push("realm");
+        if (!guild) missingParams.push("guild");
+
+        if (missingParams.length > 0) {
+            return res.status(400).json({ 
+                error: `Missing required query parameters: ${missingParams.join(", ")}` 
+            });
+        }
+
         const guild_id = guild_ids[guild?.toLowerCase()];
+        if (!guild_id) {
+            return res.status(400).json({ 
+                error: `Guild '${guild}' is not found in predefined guild_ids.` 
+            });
+        }
 
         if (!pullId) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);

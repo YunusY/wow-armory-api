@@ -1,66 +1,131 @@
 require('dotenv').config({ path: '.env.local' });
+const https = require('https');
 
-const clientId = process.env.BLIZZARD_CLIENT_ID;
-const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
+async function testBlizzardArmory() {
+    console.log("=========================================");
+    console.log("BLIZZARD ARMORY DIRECT CHARACTER TEST");
+    console.log("=========================================");
 
-async function testArmory() {
-    console.log("1. Testing Blizzard OAuth Token...");
-    
+    const clientId = (process.env.BLIZZARD_CLIENT_ID || '').trim();
+    const clientSecret = (process.env.BLIZZARD_CLIENT_SECRET || '').trim();
+
     if (!clientId || !clientSecret) {
-        console.error("❌ Credentials missing from .env.local!");
+        console.error("\n❌ Credentials missing from .env.local!");
         return;
     }
 
+    // 1. Get OAuth Token
+    console.log("[1/3] Authenticating with Blizzard...");
+    const token = await getToken(clientId, clientSecret);
+    console.log(`      ✅ Token Acquired! (${token.substring(0, 12)}...)`);
+
+    // 2. Query Echo's active raid characters from Raider.IO
+    console.log("\n[2/3] Fetching active Echo roster from Raider.IO...");
+    const rioUrl = "https://raider.io/api/v1/live-tracking/guild/raid-comps?raid=amirdrassil-the-dreams-hope&difficulty=mythic&id=1047044&guild_id=1047044&region=eu&realm=tarren-mill&boss=fyrakk-the-blazing&guild=echo";
+    
+    let testList = [
+        { name: "clickles", realm: "tarren-mill" },
+        { name: "scrype", realm: "tarren-mill" },
+        { name: "meevix", realm: "tarren-mill" }
+    ];
+
     try {
-        // Step 1: Get Access Token
-        const auth = Buffer.from(`${clientId.trim()}:${clientSecret.trim()}`).toString('base64');
-        const tokenRes = await fetch('https://eu.battle.net/oauth/token', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: 'grant_type=client_credentials'
-        });
-
-        if (!tokenRes.ok) {
-            console.error("❌ Token Request Failed:", await tokenRes.text());
-            return;
+        const rioRes = await fetch(rioUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+        if (rioRes.ok) {
+            const rioData = await rioRes.json();
+            const roster = rioData.details?.roster || [];
+            if (roster.length > 0) {
+                console.log(`      ✅ Found ${roster.length} active players in roster.`);
+                testList = roster.slice(0, 5).map(r => ({
+                    name: r.character.name,
+                    realm: (r.character.realm && r.character.realm.slug) ? r.character.realm.slug : "tarren-mill"
+                }));
+            }
         }
+    } catch (e) {}
 
-        const { access_token } = await tokenRes.json();
-        console.log("✅ Token acquired successfully!");
-
-        // Step 2: Fetch Equipment for a specific character
-        const region = "eu";
-        const realm = "tarren-mill";
-        const characterName = "gingi"; // <--- CHANGE THIS to any player in the raid with the BoE!
-
-        console.log(`2. Fetching equipment for ${characterName}-${realm}...`);
-
-        const equipUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realm}/${characterName}/equipment?namespace=profile-${region}&locale=en_US`;
-
-        const equipRes = await fetch(equipUrl, {
-            headers: { 'Authorization': `Bearer ${access_token}` }
-        });
-
-        if (!equipRes.ok) {
-            console.error("❌ Equipment Fetch Failed:", await equipRes.text());
-            return;
+    // 3. Query Armory for the active characters
+    console.log(`\n[3/3] Querying Blizzard Armory Equipment...`);
+    
+    for (const target of testList) {
+        console.log(`\nTesting ${target.name}-${target.realm}...`);
+        const success = await fetchEquipment(token, target.realm, target.name);
+        if (success) {
+            console.log("\n=========================================");
+            console.log("🎉 SUCCESS! 100% WORKING ARMORY CONNECTION!");
+            console.log("=========================================\n");
+            break;
         }
-
-        const data = await equipRes.json();
-        console.log(`✅ Success! Retrieved ${data.equipped_items.length} equipped items.`);
-
-        // Step 3: Print the Feet item (Fading Dawn Sabatons)
-        const feetItem = data.equipped_items.find(item => item.slot.type === "FEET");
-        
-        console.log("\n--- FEET ITEM RAW DATA ---");
-        console.log(JSON.stringify(feetItem, null, 2));
-
-    } catch (err) {
-        console.error("❌ Unexpected Error:", err.message);
     }
 }
 
-testArmory();
+function getToken(id, secret) {
+    return new Promise((resolve, reject) => {
+        const auth = Buffer.from(`${id}:${secret}`).toString('base64');
+        const postData = 'grant_type=client_credentials';
+        const req = https.request({
+            hostname: 'eu.battle.net',
+            path: '/oauth/token',
+            method: 'POST',
+            family: 4,
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postData),
+                'User-Agent': 'Mozilla/5.0'
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) resolve(JSON.parse(data).access_token);
+                else reject(new Error(`OAuth HTTP ${res.statusCode}: ${data}`));
+            });
+        });
+        req.on('error', reject);
+        req.write(postData);
+        req.end();
+    });
+}
+
+function fetchEquipment(token, realm, character) {
+    return new Promise((resolve) => {
+        const realmSlug = encodeURIComponent(realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
+        const nameSlug = encodeURIComponent(character.toLowerCase());
+
+        const req = https.request({
+            hostname: 'eu.api.blizzard.com',
+            path: `/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-eu&locale=en_US`,
+            method: 'GET',
+            family: 4,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'User-Agent': 'Mozilla/5.0'
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    const parsed = JSON.parse(data);
+                    console.log(`  ✅ SUCCESS! HTTP 200 OK - Found ${parsed.equipped_items?.length} items.`);
+                    
+                    const feet = parsed.equipped_items?.find(i => i.slot?.type === "FEET");
+                    console.log(`  Feet Item Name: "${feet?.name || 'None'}"`);
+                    if (feet && feet.stats) {
+                        console.log("\n  Feet Item Stats Array:");
+                        console.log(JSON.stringify(feet.stats, null, 2));
+                    }
+                    resolve(true);
+                } else {
+                    console.log(`  ❌ HTTP ${res.statusCode}: ${character}-${realmSlug} not found on Blizzard API.`);
+                    resolve(false);
+                }
+            });
+        });
+        req.on('error', () => resolve(false));
+        req.end();
+    });
+}
+
+testBlizzardArmory();
