@@ -162,7 +162,8 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 // Look up real stats from Armory to append to the bonus list
                 if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
-                    secondstats+=`\narmoryItem.stats\n`
+                    console.log()
+                    secondstats+=`\n${armoryItem.stats}\n`;
                     if (armoryItem && armoryItem.stats) {
                         // Filter out secondary stats
                         const secStats = armoryItem.stats.filter(s =>
@@ -196,7 +197,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         combinedSimcText +=  simc + "\n\n";
     }
     
-    return `secondstats+\n+combinedSimcText`.trim();
+    return `${secondstats}+\n+${combinedSimcText}`.trim();
 }
 
 module.exports = async function handler(req, res) {
