@@ -29,7 +29,7 @@ let tokenExpiry = 0;
 async function getBlizzardToken() {
     if (blizzardToken && Date.now() < tokenExpiry) return blizzardToken;
     if (!clientId || !clientSecret) {
-        throw new Error("Missing Blizzard API credentials. Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel & REDEPLOY.");
+        throw new Error("Missing Blizzard API credentials. Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel.");
     }
     
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
@@ -42,7 +42,7 @@ async function getBlizzardToken() {
         body: 'grant_type=client_credentials'
     });
     
-    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API. Check Client ID / Secret.");
+    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API.");
     
     const data = await response.json();
     blizzardToken = data.access_token;
@@ -122,14 +122,13 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                         const eq = await armoryResponse.json();
                         if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
                     } else {
-                        armoryErrors[player.index] = `Blizzard API returned HTTP ${armoryResponse.status} for character ${player.name}-${realmSlug}`;
+                        armoryErrors[player.index] = `HTTP ${armoryResponse.status} for ${player.name}-${realmSlug}`;
                     }
                 } catch (err) {
                     armoryErrors[player.index] = `Fetch error: ${err.message}`;
                 }
             }));
         } catch (tokenErr) {
-            // Token error affects all players
             playersToFetch.forEach(p => armoryErrors[p.index] = tokenErr.message);
         }
     }
@@ -150,13 +149,25 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
                 const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
 
-                // Print informative status note if BoE is detected
+                // Diagnosing BoE processing
                 if (isBoe) {
+                    let debugMsg = "";
                     if (armoryErrors[i]) {
-                        simc += `# ARMORY_INFO: Failed to fetch Armory -> ${armoryErrors[i]}\n`;
+                        debugMsg = `Armory fetch failed -> ${armoryErrors[i]}`;
                     } else if (!armoryData[i]) {
-                        simc += `# ARMORY_INFO: Player data missing from Armory.\n`;
+                        debugMsg = `Armory data missing for player ${p.name}`;
+                    } else {
+                        // FIX: Convert both IDs to Strings for comparison!
+                        const armoryItem = armoryData[i].find(ai => String(ai.item?.id) === String(item.item_id));
+                        if (!armoryItem) {
+                            debugMsg = `Item ID ${item.item_id} not found in player's Armory list`;
+                        } else if (!armoryItem.stats) {
+                            debugMsg = `Item ${item.item_id} found in Armory, but has no 'stats' array`;
+                        } else {
+                            debugMsg = `SUCCESS! Found stats in Armory`;
+                        }
                     }
+                    simc += `# ARMORY_DEBUG (${itemName}): ${debugMsg}\n`;
                 }
 
                 if (slot === "mainhand" || slot === "offhand") {
@@ -171,12 +182,12 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
                 if (bonusStr) simc += `,bonus_id=${bonusStr}`;
 
-                // Parse EXACT stats from the Armory and use SimC's "crafted_stats" parameter
+                // Parse EXACT stats from the Armory using String comparison
                 if (isBoe && armoryData[i]) {
-                    const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
+                    const armoryItem = armoryData[i].find(ai => String(ai.item?.id) === String(item.item_id));
                     if (armoryItem && armoryItem.stats) {
                         const secStats = armoryItem.stats.filter(s =>
-                            ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type.type)
+                            ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type?.type)
                         );
                         
                         secStats.sort((a, b) => b.value - a.value);
