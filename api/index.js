@@ -1,7 +1,7 @@
 const clientId = process.env.BLIZZARD_CLIENT_ID;
 const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
 
-// Hardcoded Data
+// Hardcoded Data (Make sure you add the exact Midnight BoE names here!)
 const boeItems = [
     "primal_spark_pauldrons",
     "power_stance_breeches",
@@ -10,8 +10,7 @@ const boeItems = [
     "nullstriders_boots",
     "raging_storm_sash",
     "fading_dawn_sabatons",
-    "breastplate_of_the_final defense"
-    // Add your Midnight tier BoEs here if needed!
+    "breastplate_of_the_final_defense" // Fixed the space here just in case!
 ];
 
 const guild_ids = {
@@ -19,13 +18,11 @@ const guild_ids = {
     "liquid": "1712677"
 };
 
-// Generic Headers to prevent Cloudflare / API blocking
 const headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
 };
 
-// Blizzard Token Management
 let blizzardToken = null;
 let tokenExpiry = 0;
 
@@ -49,26 +46,19 @@ async function getBlizzardToken() {
     
     const data = await response.json();
     blizzardToken = data.access_token;
-    // Buffer expiration by 60 seconds to ensure we don't use a token as it expires
     tokenExpiry = Date.now() + (data.expires_in - 60) * 1000; 
     
     return blizzardToken;
 }
 
-// Helper 1: Get recent pull ID
 async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
-    const params = new URLSearchParams({
-        raid, boss, difficulty, region, realm, guild
-    });
+    const params = new URLSearchParams({ raid, boss, difficulty, region, realm, guild });
     if (period) params.append('period', period);
 
     const url = `https://raider.io/api/v1/live-tracking/guild/boss-pulls?${params.toString()}`;
     const response = await fetch(url, { headers });
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Raider.IO Boss-Pulls Error: HTTP ${response.status} - ${errorText}`);
-    }
+    if (!response.ok) throw new Error(`Raider.IO Boss-Pulls Error: HTTP ${response.status}`);
     
     const data = await response.json();
     if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found on Raider.IO for these parameters.');
@@ -76,24 +66,15 @@ async function getRecentPullId(raid, boss, difficulty, region, realm, guild, per
     return data.pulls[data.pulls.length - 1].details.id;
 }
 
-// Helper 2: Get SimC Data for All 20 Players
 async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId) {
-    const params = new URLSearchParams({
-        raid, difficulty, id: pullId, guild_id, region, realm, boss, guild
-    });
-
+    const params = new URLSearchParams({ raid, difficulty, id: pullId, guild_id, region, realm, boss, guild });
     const url = `https://raider.io/api/v1/live-tracking/guild/raid-comps?${params.toString()}`;
     const response = await fetch(url, { headers });
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Raider.IO Raid-Comps Error: HTTP ${response.status} - ${errorText}`);
-    }
+    if (!response.ok) throw new Error(`Raider.IO Raid-Comps Error: HTTP ${response.status}`);
     
     const data = await response.json();
-    if (!data.details || !data.details.roster) {
-        throw new Error('Roster data is missing from Raider.IO response.');
-    }
+    if (!data.details || !data.details.roster) throw new Error('Roster data is missing.');
 
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
     
@@ -107,8 +88,9 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         const items = p.items.items;
         for (const slot of slots) {
             if (items[slot]) {
-                const itemName = items[slot].name.replace(/'/g, "").replace(/ /g, "_").toLowerCase();
-                if (boeItems.includes(itemName)) {
+                const rawName = items[slot].name.toLowerCase();
+                // Check if any BoE name is part of the item name (handles random suffixes)
+                if (boeItems.some(boe => rawName.includes(boe.replace(/_/g, ' ')))) {
                     hasBoe = true;
                     break;
                 }
@@ -116,13 +98,12 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
         
         if (hasBoe) {
-            // RIO usually stores realm as an object { slug: '...' }, fallback to standard realm if not
             const playerRealm = (p.realm && p.realm.slug) ? p.realm.slug : realm;
             playersToFetch.push({ index: i, name: p.name, realm: playerRealm });
         }
     }
 
-    // --- STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY ---
+    // --- STEP B: FETCH BLIZZARD ARMORY ---
     const armoryData = {};
     if (playersToFetch.length > 0) {
         const token = await getBlizzardToken();
@@ -133,19 +114,14 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 const nameSlug = encodeURIComponent(player.name.toLowerCase());
                 
                 const bUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${region}&locale=en_US`;
-                const armoryResponse = await fetch(bUrl, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
+                const armoryResponse = await fetch(bUrl, { headers: { 'Authorization': `Bearer ${token}` } });
                 
                 if (armoryResponse.ok) {
                     const eq = await armoryResponse.json();
-                    if (eq.equipped_items) {
-                        armoryData[player.index] = eq.equipped_items;
-                    }
+                    if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
                 }
             } catch (err) {
-                console.error(`Failed to fetch armory for ${player.name}:`, err);
-                // Fails gracefully; if Armory drops the call, we just fallback to RIO stats below
+                console.error(`Armory error for ${player.name}:`, err);
             }
         }));
     }
@@ -155,28 +131,34 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     for (let i = 0; i < 20; i++) {
         if (!data.details.roster[i]) break; 
-
         const p = data.details.roster[i].character;
 
-        // 1. ACTOR DECLARATION
-        let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\n`;
-        simc += "level=90\n"; // Note: Might need to bump this to 90 or 100 for Midnight!
-        simc += `race=${p.race.slug.replaceAll("-", "_")}\n`;
-        simc += `spec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\n`;
-        simc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
-
-        // 2. GEAR
+        let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\nlevel=90\nrace=${p.race.slug.replaceAll("-", "_")}\nspec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\ntalents=${p.talentLoadout.exportLoadoutText}\n`;
         const items = p.items.items;
 
         for (const slot of slots) {
             const item = items[slot];
             if (item) {
                 const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
-                
-                if (slot === "mainhand") {
-                    simc += `main_hand=${itemName},id=${item.item_id}`;
-                } else if (slot === "offhand") {
-                    simc += `off_hand=${itemName},id=${item.item_id}`;
+                const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
+
+                // --- INJECT DEBUG INFO IF BoE IS FOUND ---
+                if (isBoe) {
+                    simc += `\n# DEBUG: BoE Detected -> ${itemName}\n`;
+                    if (armoryData[i]) {
+                        const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
+                        if (armoryItem) {
+                            simc += `# DEBUG: Armory Found! RIO Bonuses: [${item.bonuses?.join("/") || "NONE"}] | Armory Bonuses: [${armoryItem.bonus_list?.join("/") || "NONE"}]\n`;
+                        } else {
+                            simc += `# DEBUG: Item ID ${item.item_id} not found in Armory response.\n`;
+                        }
+                    } else {
+                        simc += `# DEBUG: Armory fetch failed for player ${p.name}.\n`;
+                    }
+                }
+
+                if (slot === "mainhand" || slot === "offhand") {
+                    simc += `${slot === "mainhand" ? "main_hand" : "off_hand"}=${itemName},id=${item.item_id}`;
                 } else {
                     simc += `${slot}=${itemName},id=${item.item_id}`;
                 }
@@ -184,11 +166,9 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 if (item.enchant) simc += `,enchant_id=${item.enchant}`;
                 if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
                 
-                // Base bonuses from Raider.IO
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
 
-                // Overwrite with Blizzard Armory bonuses if it is a BoE
-                if (boeItems.includes(itemName.toLowerCase()) && armoryData[i]) {
+                if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
                     if (armoryItem && armoryItem.bonus_list) {
                         bonusStr = armoryItem.bonus_list.join("/");
@@ -199,21 +179,17 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 simc += "\n";
             }
         }
-        
-        // Append current player to master string
         combinedSimcText += simc + "\n\n";
     }
     
     return combinedSimcText.trim();
 }
 
-// VERCEL NATIVE HANDLER
 module.exports = async function handler(req, res) {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method Not Allowed' });
 
     try {
         const clean = (val) => (val === 'undefined' || val === 'null' || val === '') ? undefined : val;
-
         let raid = clean(req.query.raid);
         let boss = clean(req.query.boss);
         let difficulty = clean(req.query.difficulty);
@@ -223,26 +199,7 @@ module.exports = async function handler(req, res) {
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
 
-        const missingParams = [];
-        if (!raid) missingParams.push("raid");
-        if (!boss) missingParams.push("boss");
-        if (!difficulty) missingParams.push("difficulty");
-        if (!region) missingParams.push("region");
-        if (!realm) missingParams.push("realm");
-        if (!guild) missingParams.push("guild");
-
-        if (missingParams.length > 0) {
-            return res.status(400).json({ 
-                error: `Missing required query parameters: ${missingParams.join(", ")}` 
-            });
-        }
-
-        const guild_id = guild_ids[guild.toLowerCase()];
-        if (!guild_id) {
-            return res.status(400).json({ 
-                error: `Guild '${guild}' is not found in the predefined guild_ids. Supported guilds are: ${Object.keys(guild_ids).join(", ")}` 
-            });
-        }
+        const guild_id = guild_ids[guild?.toLowerCase()];
 
         if (!pullId) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
@@ -254,7 +211,6 @@ module.exports = async function handler(req, res) {
         return res.status(200).send(simcText);
 
     } catch (error) {
-        console.error("Function Error: ", error.message);
         return res.status(500).json({ error: error.message });
     }
 };
