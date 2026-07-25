@@ -1,7 +1,7 @@
 const clientId = process.env.BLIZZARD_CLIENT_ID;
 const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
 
-// Hardcoded Data (Make sure you add the exact Midnight BoE names here!)
+// Hardcoded Data
 const boeItems = [
     "primal_spark_pauldrons",
     "power_stance_breeches",
@@ -10,8 +10,15 @@ const boeItems = [
     "nullstriders_boots",
     "raging_storm_sash",
     "fading_dawn_sabatons",
-    "breastplate_of_the_final_defense" // Fixed the space here just in case!
+    "breastplate_of_the_final_defense" // Fixed the space here
 ];
+
+const stat_bonus_ids = {
+    "crit haste": "32:36", "crit mastery": "32:49", "crit versa": "32:40",
+    "haste crit": "36:32", "haste mastery": "36:49", "haste versa": "36:40",
+    "mastery crit": "49:32", "mastery haste": "49:36", "mastery versa": "49:40",
+    "versa crit": "40:32", "versa haste": "40:36", "versa mastery": "40:49"
+};
 
 const guild_ids = {
     "echo": "1047044",
@@ -89,7 +96,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         for (const slot of slots) {
             if (items[slot]) {
                 const rawName = items[slot].name.toLowerCase();
-                // Check if any BoE name is part of the item name (handles random suffixes)
                 if (boeItems.some(boe => rawName.includes(boe.replace(/_/g, ' ')))) {
                     hasBoe = true;
                     break;
@@ -142,21 +148,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
                 const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
 
-                // --- INJECT DEBUG INFO IF BoE IS FOUND ---
-                if (isBoe) {
-                    simc += `\n# DEBUG: BoE Detected -> ${itemName}\n`;
-                    if (armoryData[i]) {
-                        const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
-                        if (armoryItem) {
-                            simc += `# DEBUG: Armory Found! RIO Bonuses: [${item.bonuses?.join("/") || "NONE"}] | Armory Bonuses: [${armoryItem.bonus_list?.join("/") || "NONE"}]\n`;
-                        } else {
-                            simc += `# DEBUG: Item ID ${item.item_id} not found in Armory response.\n`;
-                        }
-                    } else {
-                        simc += `# DEBUG: Armory fetch failed for player ${p.name}.\n`;
-                    }
-                }
-
                 if (slot === "mainhand" || slot === "offhand") {
                     simc += `${slot === "mainhand" ? "main_hand" : "off_hand"}=${itemName},id=${item.item_id}`;
                 } else {
@@ -168,10 +159,31 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
 
+                // Look up real stats from Armory to append to the bonus list
                 if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
-                    if (armoryItem && armoryItem.bonus_list) {
-                        bonusStr = armoryItem.bonus_list.join("/");
+                    if (armoryItem && armoryItem.stats) {
+                        // Filter out secondary stats
+                        const secStats = armoryItem.stats.filter(s =>
+                            ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type.type)
+                        );
+                        
+                        // Sort descending so the stat with the highest allocation is first (Major vs Minor stat)
+                        secStats.sort((a, b) => b.value - a.value);
+                        
+                        if (secStats.length >= 2) {
+                            const statMap = { "CRITICAL_STRIKE": "crit", "HASTE": "haste", "MASTERY": "mastery", "VERSATILITY": "versa" };
+                            const stat1 = statMap[secStats[0].type.type];
+                            const stat2 = statMap[secStats[1].type.type];
+                            
+                            const statKey = `${stat1} ${stat2}`;
+                            const missingBonus = stat_bonus_ids[statKey];
+                            
+                            // Append the custom stat ID (e.g., /32:36) to the end of the list
+                            if (missingBonus) {
+                                bonusStr += (bonusStr ? "/" : "") + missingBonus;
+                            }
+                        }
                     }
                 }
 
