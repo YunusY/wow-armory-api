@@ -141,7 +141,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
         let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\nlevel=90\nrace=${p.race.slug.replaceAll("-", "_")}\nspec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\ntalents=${p.talentLoadout.exportLoadoutText}\n`;
         const items = p.items.items;
-
+        let secondstats = "inc\n";
         for (const slot of slots) {
             const item = items[slot];
             if (item) {
@@ -162,6 +162,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 // Look up real stats from Armory to append to the bonus list
                 if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
+                    secondstats+=`\narmoryItem.stats\n`
                     if (armoryItem && armoryItem.stats) {
                         // Filter out secondary stats
                         const secStats = armoryItem.stats.filter(s =>
@@ -189,6 +190,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
                 if (bonusStr) simc += `,bonus_id=${bonusStr}`;
                 simc += "\n";
+                
             }
         }
         combinedSimcText += simc + "\n\n";
