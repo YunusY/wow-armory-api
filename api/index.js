@@ -82,7 +82,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         throw new Error('Roster data is missing from Raider.IO response.');
     }
 
-    const simcResults = {};
+    let combinedSimcText = "";
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
 
     // Loop through players from index 0 to 19 (Max 20 players)
@@ -130,11 +130,11 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
             }
         }
         
-        // Save the generated text into the JSON object with the index as the key
-        simcResults[i] = simc;
+        // Append the current player to the master string, with a couple of linebreaks between players
+        combinedSimcText += simc + "\n\n";
     }
     
-    return simcResults;
+    return combinedSimcText.trim();
 }
 
 // VERCEL NATIVE HANDLER
@@ -154,7 +154,7 @@ module.exports = async function handler(req, res) {
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
 
-        // Validation for missing required parameters (guild_id removed)
+        // Validation for missing required parameters
         const missingParams = [];
         if (!raid) missingParams.push("raid");
         if (!boss) missingParams.push("boss");
@@ -182,12 +182,12 @@ module.exports = async function handler(req, res) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
         }
 
-        // Generate JSON profile of all 20 SIMCs
-        const simcData = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
+        // Generate the combined plain-text profile of all 20 SIMCs
+        const simcText = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
 
-        // Return the final payload as JSON
-        res.setHeader('Content-Type', 'application/json');
-        return res.status(200).json(simcData);
+        // Return the final payload as raw text so it looks just like a standard SimC export
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.status(200).send(simcText);
 
     } catch (error) {
         console.error("Function Error: ", error.message);
