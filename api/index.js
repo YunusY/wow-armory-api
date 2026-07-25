@@ -1,7 +1,4 @@
-const guild_ids = {
-  "echo": "1047044",
-  "liquid": "1712677"
-}// Hardcoded Data
+// Hardcoded Data
 const boeItems = [
     "primal_spark_pauldrons",
     "power_stance_breeches",
@@ -30,40 +27,54 @@ const spec_stat_choices = {
     "demonhunter-devourer": "haste mastery"
 };
 
+const guild_ids = {
+    "echo": "1047044",
+    "liquid": "1712677"
+};
+
+// Generic Headers to prevent Cloudflare / API blocking
+const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+};
+
 // Helper 1: Get recent pull ID
 async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
-    const url = `https://raider.io/api/v1/live-tracking/guild/boss-pulls` +
-        `?raid=${encodeURIComponent(raid)}` +
-        `&boss=${encodeURIComponent(boss)}` +
-        `&difficulty=${encodeURIComponent(difficulty)}` +
-        `&region=${encodeURIComponent(region)}` +
-        `&realm=${encodeURIComponent(realm)}` +
-        `&guild=${encodeURIComponent(guild)}` +
-        `&period=${encodeURIComponent(period)}`;
+    const params = new URLSearchParams({
+        raid, boss, difficulty, region, realm, guild
+    });
+    // Only append period if it exists and isn't empty
+    if (period) params.append('period', period);
 
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Raider.IO Boss-Pulls Error: HTTP ${response.status}`);
+    const url = `https://raider.io/api/v1/live-tracking/guild/boss-pulls?${params.toString()}`;
+    
+    const response = await fetch(url, { headers });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Raider.IO Boss-Pulls Error: HTTP ${response.status} - ${errorText}`);
+    }
     
     const data = await response.json();
-    if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found on Raider.IO for this period.');
+    if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found on Raider.IO for these parameters.');
     
     return data.pulls[data.pulls.length - 1].details.id;
 }
 
 // Helper 2: Get SimC Data
 async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId, playerIndex) {
-    const url = `https://raider.io/api/v1/live-tracking/guild/raid-comps` +
-        `?raid=${encodeURIComponent(raid)}` +
-        `&difficulty=${encodeURIComponent(difficulty)}` +
-        `&id=${encodeURIComponent(pullId)}` +
-        `&guild_id=${encodeURIComponent(guild_id)}` +
-        `&region=${encodeURIComponent(region)}` +
-        `&realm=${encodeURIComponent(realm)}` +
-        `&boss=${encodeURIComponent(boss)}` +
-        `&guild=${encodeURIComponent(guild)}`;
+    const params = new URLSearchParams({
+        raid, difficulty, id: pullId, guild_id, region, realm, boss, guild
+    });
 
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Raider.IO Raid-Comps Error: HTTP ${response.status}`);
+    const url = `https://raider.io/api/v1/live-tracking/guild/raid-comps?${params.toString()}`;
+
+    const response = await fetch(url, { headers });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Raider.IO Raid-Comps Error: HTTP ${response.status} - ${errorText}`);
+    }
     
     const data = await response.json();
     
@@ -116,24 +127,47 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
 // VERCEL NATIVE HANDLER
 module.exports = async function handler(req, res) {
-    // Only allow GET requests
-    if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method Not Allowed' });
-    }
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method Not Allowed' });
 
     try {
-        // Extract query parameters
-        const { raid, boss, difficulty, region, realm, guild, guild_id, period, playerIndex } = req.query;
-        let { pullId } = req.query;
+        // Safe parameter extraction: Strips literal "undefined" or "null" strings
+        const clean = (val) => (val === 'undefined' || val === 'null' || val === '') ? undefined : val;
 
-        // Validation for minimum required parameters
-        if (!raid || !boss || !difficulty || !region || !realm || !guild || !guild_id || playerIndex === undefined) {
-            return res.status(400).json({ error: "Missing required query parameters." });
+        let raid = clean(req.query.raid);
+        let boss = clean(req.query.boss);
+        let difficulty = clean(req.query.difficulty);
+        let region = clean(req.query.region);
+        let realm = clean(req.query.realm);
+        let guild = clean(req.query.guild);
+        let guild_id = clean(req.query.guild_id);
+        let period = clean(req.query.period);
+        let pullId = clean(req.query.pullId);
+        let playerIndex = clean(req.query.playerIndex);
+
+        // Automatically assign guild_id if it's echo or liquid
+        if (!guild_id && guild) {
+            guild_id = guild_ids[guild.toLowerCase()];
+        }
+
+        // Validation for missing required parameters
+        const missingParams = [];
+        if (!raid) missingParams.push("raid");
+        if (!boss) missingParams.push("boss");
+        if (!difficulty) missingParams.push("difficulty");
+        if (!region) missingParams.push("region");
+        if (!realm) missingParams.push("realm");
+        if (!guild) missingParams.push("guild");
+        if (!guild_id) missingParams.push("guild_id");
+        if (playerIndex === undefined) missingParams.push("playerIndex");
+
+        if (missingParams.length > 0) {
+            return res.status(400).json({ 
+                error: `Missing required query parameters: ${missingParams.join(", ")}` 
+            });
         }
 
         // Fetch recent pull if no pullId is passed
         if (!pullId) {
-            if (!period) return res.status(400).json({ error: "Provide either pullId or period to fetch the recent pull." });
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
         }
 
@@ -146,6 +180,7 @@ module.exports = async function handler(req, res) {
 
     } catch (error) {
         console.error("Function Error: ", error.message);
+        // Expose the error message directly to the front-end
         return res.status(500).json({ error: error.message });
     }
 };
