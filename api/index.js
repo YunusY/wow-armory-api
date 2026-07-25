@@ -162,7 +162,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 // Look up real stats from Armory to append to the bonus list
                 if (isBoe && armoryData[i]) {
                     const armoryItem = armoryData[i].find(ai => ai.item.id === item.item_id);
-                    console.log()
+                    cconsole.log("My object:", armoryItem.stats);
                     secondstats+=`\n${armoryItem.stats}\n`;
                     if (armoryItem && armoryItem.stats) {
                         // Filter out secondary stats
