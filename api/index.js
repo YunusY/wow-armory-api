@@ -1,7 +1,9 @@
-const clientId = process.env.BLIZZARD_CLIENT_ID;
-const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
+const https = require('https');
 
-// Hardcoded Data
+const clientId = (process.env.BLIZZARD_CLIENT_ID || '').trim();
+const clientSecret = (process.env.BLIZZARD_CLIENT_SECRET || '').trim();
+
+// Hardcoded BoE list
 const boeItems = [
     "primal_spark_pauldrons",
     "power_stance_breeches",
@@ -12,6 +14,24 @@ const boeItems = [
     "fading_dawn_sabatons",
     "breastplate_of_the_final_defense"
 ];
+
+// SimC crafted_stats tokens (32=Crit, 36=Haste, 40=Vers, 49=Mastery)
+const stat_bonus_ids = { 
+    "crit haste": "32/36", "crit mastery": "32/49", "crit versa": "32/40", 
+    "haste crit": "36/32", "haste mastery": "36/49", "haste versa": "36/40", 
+    "mastery crit": "49/32", "mastery haste": "49/36", "mastery versa": "49/40", 
+    "versa crit": "40/32", "versa haste": "40/36", "versa mastery": "40/49" 
+};
+
+const spec_stat_choices = {
+    "mage-frost": "crit mastery", "paladin-retribution": "crit mastery",
+    "warrior-protection": "crit haste", "druid-guardian": "haste mastery",
+    "deathknight-unholy": "crit mastery", "hunter-marksmanship": "crit mastery",
+    "priest-shadow": "mastery haste", "rogue-subtlety": "crit mastery",
+    "shaman-elemental": "crit mastery", "warlock-demonology": "crit haste",
+    "monk-windwalker": "haste crit", "evoker-augmentation": "crit haste",
+    "demonhunter-devourer": "haste mastery"
+};
 
 const guild_ids = {
     "echo": "1047044",
@@ -26,29 +46,45 @@ const headers = {
 let blizzardToken = null;
 let tokenExpiry = 0;
 
-async function getBlizzardToken() {
+// Fetch OAuth token cleanly using native HTTPS
+async function getBlizzardToken(region = 'eu') {
     if (blizzardToken && Date.now() < tokenExpiry) return blizzardToken;
-    if (!clientId || !clientSecret) {
-        throw new Error("Missing Blizzard API credentials. Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in Vercel.");
-    }
+    if (!clientId || !clientSecret) return null;
     
+    const cleanRegion = (region || 'eu').toLowerCase();
+    const tokenHost = ['eu', 'us', 'kr', 'tw'].includes(cleanRegion) ? `${cleanRegion}.battle.net` : 'oauth.battle.net';
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    const response = await fetch('https://oauth.battle.net/token', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Basic ${auth}`,
-            'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: 'grant_type=client_credentials'
+    const bodyData = 'grant_type=client_credentials';
+
+    return new Promise((resolve) => {
+        const req = https.request({
+            hostname: tokenHost,
+            path: '/oauth/token',
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(bodyData),
+                'User-Agent': headers['User-Agent']
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        const parsed = JSON.parse(data);
+                        blizzardToken = parsed.access_token;
+                        tokenExpiry = Date.now() + (parsed.expires_in - 60) * 1000;
+                        resolve(blizzardToken);
+                    } catch (e) { resolve(null); }
+                } else { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.write(bodyData);
+        req.end();
     });
-    
-    if (!response.ok) throw new Error("Failed to authenticate with Blizzard API.");
-    
-    const data = await response.json();
-    blizzardToken = data.access_token;
-    tokenExpiry = Date.now() + (data.expires_in - 60) * 1000; 
-    
-    return blizzardToken;
 }
 
 async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
@@ -104,32 +140,26 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     // --- STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY ---
     const armoryData = {};
-    const armoryErrors = {};
 
     if (playersToFetch.length > 0) {
-        try {
-            const token = await getBlizzardToken();
-            
+        const cleanRegion = (region || "eu").toLowerCase();
+        const token = await getBlizzardToken(cleanRegion);
+        
+        if (token) {
             await Promise.all(playersToFetch.map(async (player) => {
                 try {
                     const realmSlug = encodeURIComponent(player.realm.toLowerCase().replace(/'/g, '').replace(/\s+/g, '-'));
                     const nameSlug = encodeURIComponent(player.name.toLowerCase());
                     
-                    const bUrl = `https://${region}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${region}&locale=en_US`;
-                    const armoryResponse = await fetch(bUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+                    const bUrl = `https://${cleanRegion}.api.blizzard.com/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${cleanRegion}&locale=en_US`;
+                    const armoryResponse = await fetch(bUrl, { headers: { ...headers, 'Authorization': `Bearer ${token}` } });
                     
                     if (armoryResponse.ok) {
                         const eq = await armoryResponse.json();
                         if (eq.equipped_items) armoryData[player.index] = eq.equipped_items;
-                    } else {
-                        armoryErrors[player.index] = `HTTP ${armoryResponse.status} for ${player.name}-${realmSlug}`;
                     }
-                } catch (err) {
-                    armoryErrors[player.index] = `Fetch error: ${err.message}`;
-                }
+                } catch (err) {}
             }));
-        } catch (tokenErr) {
-            playersToFetch.forEach(p => armoryErrors[p.index] = tokenErr.message);
         }
     }
 
@@ -149,27 +179,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
                 const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
 
-                // Diagnosing BoE processing
-                if (isBoe) {
-                    let debugMsg = "";
-                    if (armoryErrors[i]) {
-                        debugMsg = `Armory fetch failed -> ${armoryErrors[i]}`;
-                    } else if (!armoryData[i]) {
-                        debugMsg = `Armory data missing for player ${p.name}`;
-                    } else {
-                        // FIX: Convert both IDs to Strings for comparison!
-                        const armoryItem = armoryData[i].find(ai => String(ai.item?.id) === String(item.item_id));
-                        if (!armoryItem) {
-                            debugMsg = `Item ID ${item.item_id} not found in player's Armory list`;
-                        } else if (!armoryItem.stats) {
-                            debugMsg = `Item ${item.item_id} found in Armory, but has no 'stats' array`;
-                        } else {
-                            debugMsg = `SUCCESS! Found stats in Armory`;
-                        }
-                    }
-                    simc += `# ARMORY_DEBUG (${itemName}): ${debugMsg}\n`;
-                }
-
                 if (slot === "mainhand" || slot === "offhand") {
                     simc += `${slot === "mainhand" ? "main_hand" : "off_hand"}=${itemName},id=${item.item_id}`;
                 } else {
@@ -182,27 +191,48 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                 let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
                 if (bonusStr) simc += `,bonus_id=${bonusStr}`;
 
-                // Parse EXACT stats from the Armory using String comparison
-                if (isBoe && armoryData[i]) {
-                    const armoryItem = armoryData[i].find(ai => String(ai.item?.id) === String(item.item_id));
-                    if (armoryItem && armoryItem.stats) {
-                        const secStats = armoryItem.stats.filter(s =>
-                            ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type?.type)
+                // Handle BoE Crafted Stats (Armory First -> Spec Choice Second)
+                if (isBoe) {
+                    let craftedStatsStr = null;
+
+                    // 1. Try Blizzard Armory
+                    if (armoryData[i]) {
+                        const baseSlot = slot.replace(/\d+$/, "").toUpperCase();
+                        const armoryItem = armoryData[i].find(ai => 
+                            String(ai.item?.id) === String(item.item_id) || 
+                            ai.slot?.type === baseSlot
                         );
-                        
-                        secStats.sort((a, b) => b.value - a.value);
-                        
-                        if (secStats.length > 0) {
-                            const statMap = { 
-                                "CRITICAL_STRIKE": "32", 
-                                "HASTE": "36", 
-                                "VERSATILITY": "40",
-                                "MASTERY": "49" 
-                            };
+
+                        if (armoryItem && armoryItem.stats) {
+                            const secStats = armoryItem.stats.filter(s =>
+                                ["CRITICAL_STRIKE", "HASTE", "MASTERY", "VERSATILITY"].includes(s.type?.type)
+                            );
                             
-                            const statTokens = secStats.map(s => statMap[s.type.type]);
-                            simc += `,crafted_stats=${statTokens.join("/")}`;
+                            secStats.sort((a, b) => b.value - a.value);
+                            
+                            if (secStats.length > 0) {
+                                const statMap = { 
+                                    "CRITICAL_STRIKE": "32", 
+                                    "HASTE": "36", 
+                                    "VERSATILITY": "40",
+                                    "MASTERY": "49" 
+                                };
+                                craftedStatsStr = secStats.map(s => statMap[s.type.type]).join("/");
+                            }
                         }
+                    }
+
+                    // 2. Fallback to Spec Choice if Armory is unavailable
+                    if (!craftedStatsStr) {
+                        const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
+                        const statChoice = spec_stat_choices[classspec];
+                        if (statChoice && stat_bonus_ids[statChoice]) {
+                            craftedStatsStr = stat_bonus_ids[statChoice];
+                        }
+                    }
+
+                    if (craftedStatsStr) {
+                        simc += `,crafted_stats=${craftedStatsStr}`;
                     }
                 }
 
