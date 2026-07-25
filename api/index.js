@@ -1,309 +1,160 @@
-require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const { getGuild, listGuilds } = require('../lib/guilds');
-const {
-  getBossPulls,
-  getRaidComp,
-  getLatestPullId,
-  findLatestPull,
-} = require('../lib/raiderio');
-const { rosterToSimcExports } = require('../lib/simc');
-
 const app = express();
+const port = 3000;
+const guild_ids [
+  "echo": "1047044"
+  "liquid": "1712677"
+]
+// Hardcoded Data
+const boeItems = [
+    "primal_spark_pauldrons",
+    "power_stance_breeches",
+    "visage_of_unseen_truths",
+    "infernal_greatlock_girdle",
+    "nullstriders_boots",
+    "raging_storm_sash",
+    "fading_dawn_sabatons",
+    "breastplate_of_the_final defense"
+];
 
-app.use(cors());
-app.use(express.json());
-
-let tokenCache = {
-  accessToken: null,
-  expiresAt: 0,
+const stat_bonus_ids = {
+    "crit haste": "32:36", "crit mastery": "32:49", "crit versa": "32:40",
+    "haste crit": "36:32", "haste mastery": "36:49", "haster versa": "36:40", // Note: "haster versa" from your original code
+    "mastery crit": "49:32", "mastery haste": "49:36", "mastery versa": "49:40",
+    "versa crit": "40:32", "versa haste": "40:36", "versa mastery": "40:49"
 };
 
-async function getBlizzardToken() {
-  const now = Date.now();
+const spec_stat_choices = {
+    "mage-frost": "crit mastery", "paladin-retribution": "crit mastery",
+    "warrior-protection": "crit haste", "druid-guardian": "haste mastery",
+    "deathknight-unholy": "crit mastery", "hunter-marksmanship": "crit mastery",
+    "priest-shadow": "mastery haste", "rogue-subtlety": "crit mastery",
+    "shaman-elemental": "crit mastery", "warlock-demonology": "crit haste",
+    "monk-windwalker": "haste crit", "evoker-augmentation": "crit haste",
+    "demonhunter-devourer": "haste mastery"
+};
 
-  if (tokenCache.accessToken && tokenCache.expiresAt > now + 60000) {
-    return tokenCache.accessToken;
-  }
+// Helper 1: Get recent pull ID
+async function getRecentPullId(raid, boss, difficulty, region, realm, guild, period) {
+    const url = `https://raider.io/api/v1/live-tracking/guild/boss-pulls` +
+        `?raid=${encodeURIComponent(raid)}` +
+        `&boss=${encodeURIComponent(boss)}` +
+        `&difficulty=${encodeURIComponent(difficulty)}` +
+        `&region=${encodeURIComponent(region)}` +
+        `&realm=${encodeURIComponent(realm)}` +
+        `&guild=${encodeURIComponent(guild)}` +
+        `&period=${encodeURIComponent(period)}`;
 
-  const clientId = process.env.BLIZZARD_CLIENT_ID;
-  const clientSecret = process.env.BLIZZARD_CLIENT_SECRET;
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-
-  const response = await fetch('https://us.battle.net/oauth/token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-
-  if (!response.ok) {
-    throw new Error(`Auth failed with status ${response.status}`);
-  }
-
-  const data = await response.json();
-
-  tokenCache.accessToken = data.access_token;
-  tokenCache.expiresAt = now + data.expires_in * 1000;
-
-  return tokenCache.accessToken;
+    console.log(`Fetching Pull IDs: ${url}`);
+    const response = await fetch(url);
+    
+    if (!response.ok) throw new Error(`Failed to fetch pull IDs: HTTP ${response.status}`);
+    
+    const data = await response.json();
+    if (!data.pulls || data.pulls.length === 0) throw new Error('No pulls found');
+    
+    // Returns the most recent pull ID
+    return data.pulls[data.pulls.length - 1].details.id;
 }
 
-function parseSimcQuery(query) {
-  const {
-    raid,
-    boss,
-    difficulty = 'mythic',
-    period,
-    pullId,
-    format,
-  } = query;
+// Helper 2: Get SimC Data
+async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId, playerIndex) {
+    const url = `https://raider.io/api/v1/live-tracking/guild/raid-comps` +
+        `?raid=${encodeURIComponent(raid)}` +
+        `&difficulty=${encodeURIComponent(difficulty)}` +
+        `&id=${encodeURIComponent(pullId)}` +
+        `&guild_id=${encodeURIComponent(guild_id)}` +
+        `&region=${encodeURIComponent(region)}` +
+        `&realm=${encodeURIComponent(realm)}` +
+        `&boss=${encodeURIComponent(boss)}` +
+        `&guild=${encodeURIComponent(guild)}`;
 
-  if (!raid || !boss) {
-    return {
-      error: 'Missing required query params: raid, boss',
-    };
-  }
+    console.log(`Fetching Raid Comp: ${url}`);
+    const response = await fetch(url);
+    
+    if (!response.ok) throw new Error(`Failed to fetch raid comps: HTTP ${response.status}`);
+    
+    const data = await response.json();
+    
+    if (!data.details || !data.details.roster || !data.details.roster[playerIndex]) {
+        throw new Error('Player index out of bounds or roster data missing');
+    }
 
-  const parsedPeriod = period !== undefined ? Number(period) : undefined;
-  if (period !== undefined && Number.isNaN(parsedPeriod)) {
-    return {
-      error: 'Invalid period query param',
-    };
-  }
+    const p = data.details.roster[playerIndex].character;
 
-  return {
-    raid,
-    boss,
-    difficulty,
-    period: parsedPeriod,
-    pullId: pullId ? Number(pullId) : undefined,
-    format,
-  };
+    // 1. ACTOR DECLARATION
+    let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\n`;
+    simc += "level=90\n";
+    simc += `race=${p.race.slug.replaceAll("-", "_")}\n`;
+    simc += `spec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\n`;
+    simc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
+
+    // 2. GEAR
+    const items = p.items.items;
+    const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
+
+    for (const slot of slots) {
+        const item = items[slot];
+        if (item) {
+            const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
+            
+            if (slot === "mainhand") {
+                simc += `main_hand=${itemName},id=${item.item_id}`;
+            } else if (slot === "offhand") {
+                simc += `off_hand=${itemName},id=${item.item_id}`;
+            } else {
+                simc += `${slot}=${itemName},id=${item.item_id}`;
+            }
+
+            if (item.enchant) simc += `,enchant_id=${item.enchant}`;
+            if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
+            if (item.bonuses && item.bonuses.length > 0) simc += `,bonus_id=${item.bonuses.join("/")}`;
+
+            if (boeItems.includes(itemName.toLowerCase())) {
+                const classspec = `${p.class.slug.replaceAll("-", "")}-${p.spec.name.toLowerCase().replaceAll("-", "_")}`;
+                const missing_stat = stat_bonus_ids[spec_stat_choices[classspec]];
+                if (missing_stat) {
+                    simc += `/${missing_stat}`;
+                }
+            }
+            simc += "\n";
+        }
+    }
+    return simc;
 }
 
-async function resolvePullContext(guildConfig, query) {
-  const params = parseSimcQuery(query);
-  if (params.error) {
-    return { error: params.error, status: 400 };
-  }
+// API Endpoint
+app.get('/api/get-simc', async (req, res) => {
+    try {
+        // Extract query parameters
+        const { raid, boss, difficulty, region, realm, guild, guild_id, period, playerIndex } = req.query;
+        let { pullId } = req.query;
 
-  let pullId = params.pullId;
-  let period = params.period;
-  let pullsData = null;
+        // Validation for minimum required parameters
+        if (!raid || !boss || !difficulty || !region || !realm || !guild || !guild_id || playerIndex === undefined) {
+            return res.status(400).json({ error: "Missing required query parameters." });
+        }
 
-  if (pullId) {
-    return {
-      params,
-      pullId,
-      period,
-    };
-  }
+        // If pullId isn't provided, fetch the most recent one automatically
+        if (!pullId) {
+            if (!period) return res.status(400).json({ error: "Provide either pullId or period to fetch the recent pull." });
+            pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
+        }
 
-  if (period !== undefined) {
-    pullsData = await getBossPulls({
-      raid: params.raid,
-      boss: params.boss,
-      difficulty: params.difficulty,
-      region: guildConfig.region,
-      realm: guildConfig.realm,
-      guild: guildConfig.name,
-      period,
-    });
+        // Generate SIMC profile
+        const simcText = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId, parseInt(playerIndex, 10));
 
-    pullId = getLatestPullId(pullsData);
-    if (!pullId) {
-      return {
-        error: 'No pulls found for the given raid, boss, and period',
-        status: 404,
-        meta: {
-          raid: params.raid,
-          boss: params.boss,
-          difficulty: params.difficulty,
-          period,
-        },
-      };
+        // Return the SIMC text format
+        res.setHeader('Content-Type', 'text/plain');
+        res.send(simcText);
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: error.message });
     }
-
-    return {
-      params,
-      pullId,
-      period,
-      pullsData,
-    };
-  }
-
-  const latest = await findLatestPull({
-    raid: params.raid,
-    boss: params.boss,
-    difficulty: params.difficulty,
-    region: guildConfig.region,
-    realm: guildConfig.realm,
-    guild: guildConfig.name,
-  });
-
-  if (!latest) {
-    return {
-      error: 'No pulls found. Provide period or pullId, or try a different boss/raid.',
-      status: 404,
-      meta: {
-        raid: params.raid,
-        boss: params.boss,
-        difficulty: params.difficulty,
-      },
-    };
-  }
-
-  return {
-    params,
-    pullId: latest.pullId,
-    period: latest.period,
-    pullsData: latest.pullsData,
-  };
-}
-
-// Route: GET /api/guilds
-app.get('/api/guilds', (_req, res) => {
-  return res.json({ guilds: listGuilds() });
 });
 
-// Route: GET /api/simc/:guild/pulls?raid=&boss=&difficulty=mythic&period=
-app.get('/api/simc/:guild/pulls', async (req, res) => {
-  try {
-    const guildConfig = getGuild(req.params.guild);
-    const params = parseSimcQuery(req.query);
-
-    if (params.error) {
-      return res.status(400).json({ error: params.error });
-    }
-
-    if (params.period === undefined) {
-      return res.status(400).json({
-        error: 'Missing required query param: period',
-      });
-    }
-
-    const pullsData = await getBossPulls({
-      raid: params.raid,
-      boss: params.boss,
-      difficulty: params.difficulty,
-      region: guildConfig.region,
-      realm: guildConfig.realm,
-      guild: guildConfig.name,
-      period: params.period,
-    });
-
-    return res.json({
-      guild: guildConfig.key,
-      raid: params.raid,
-      boss: params.boss,
-      difficulty: params.difficulty,
-      period: params.period,
-      count: pullsData.count ?? pullsData.pulls?.length ?? 0,
-      latestPullId: getLatestPullId(pullsData),
-      pulls: pullsData.pulls ?? [],
-    });
-  } catch (error) {
-    console.error('Pull lookup error:', error.message);
-    return res.status(error.status || 500).json({
-      error: error.message || 'Internal server error',
-    });
-  }
+// Start the server
+app.listen(port, () => {
+    console.log(`SimC API Server running at http://localhost:${port}`);
 });
-
-// Route: GET /api/simc/:guild?raid=&boss=&difficulty=mythic&period=|pullId=
-app.get('/api/simc/:guild', async (req, res) => {
-  try {
-    const guildConfig = getGuild(req.params.guild);
-    const pullContext = await resolvePullContext(guildConfig, req.query);
-
-    if (pullContext.error) {
-      return res.status(pullContext.status).json({
-        error: pullContext.error,
-        meta: pullContext.meta,
-      });
-    }
-
-    const { params, pullId, period } = pullContext;
-
-    const compData = await getRaidComp({
-      raid: params.raid,
-      boss: params.boss,
-      difficulty: params.difficulty,
-      region: guildConfig.region,
-      realm: guildConfig.realm,
-      guild: guildConfig.name,
-      guildId: guildConfig.guildId,
-      pullId,
-    });
-
-    const roster = compData?.details?.roster ?? [];
-    const exports = rosterToSimcExports(roster);
-
-    if (params.format === 'raw') {
-      res.type('text/plain');
-      return res.send(exports.map((entry) => entry.simc).join('\n\n'));
-    }
-
-    return res.json({
-      guild: guildConfig.key,
-      pullId,
-      period,
-      raid: params.raid,
-      boss: params.boss,
-      difficulty: params.difficulty,
-      rosterSize: exports.length,
-      exports,
-    });
-  } catch (error) {
-    console.error('SimC export error:', error.message);
-    return res.status(error.status || 500).json({
-      error: error.message || 'Internal server error',
-    });
-  }
-});
-
-// Route: GET /api/character/:region/:realm/:name
-app.get('/api/character/:region/:realm/:name', async (req, res) => {
-  try {
-    const { region, realm, name } = req.params;
-
-    const realmSlug = realm.toLowerCase().trim().replace(/\s+/g, '-').replace(/'/g, '');
-    const characterName = name.toLowerCase().trim();
-    const regionLower = region.toLowerCase();
-
-    const accessToken = await getBlizzardToken();
-    const blizzardUrl = `https://${regionLower}.api.blizzard.com/profile/wow/character/${realmSlug}/${characterName}?namespace=profile-${regionLower}&locale=en_US`;
-
-    const apiResponse = await fetch(blizzardUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!apiResponse.ok) {
-      if (apiResponse.status === 404) {
-        return res.status(404).json({ error: 'Character not found' });
-      }
-      return res.status(apiResponse.status).json({ error: 'Blizzard API Error' });
-    }
-
-    const data = await apiResponse.json();
-
-    return res.json({
-      name: data.name,
-      realm: data.realm.name,
-      level: data.level,
-      class: data.character_class.name,
-      race: data.race.name,
-      itemLevel: data.equipped_item_level,
-      guild: data.guild ? data.guild.name : null,
-    });
-  } catch (error) {
-    console.error('Server error:', error.message);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-module.exports = app;
