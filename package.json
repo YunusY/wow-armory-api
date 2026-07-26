@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build-simc": "bash -lc 'set -ex && git clone --depth 1 https://github.com/simulationcraft/simc.git temp_simc && cmake -B temp_simc/build temp_simc -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build temp_simc/build --target simc -- -j1 && mkdir -p simc && cp temp_simc/build/simc simc/simc && cp -r temp_simc/profiles simc/profiles && rm -rf temp_simc && chmod +x simc/simc'",
+    "build-simc": "bash -lc 'set -e; REPO=https://github.com/simulationcraft/simc.git; REF=${SIMC_GIT_REF:-main}; BUILT_REF_FILE=simc/.build-ref; if [ -x simc/simc ] && [ -d simc/profiles ] && [ -f \"$BUILT_REF_FILE\" ]; then built_ref=$(cat \"$BUILT_REF_FILE\"); remote_ref=$(git ls-remote \"$REPO\" \"$REF\" | cut -f1); if [ -n \"$remote_ref\" ] && [ \"$built_ref\" = \"$remote_ref\" ]; then echo \"SimC already built for remote ref $REF ($remote_ref), skipping rebuild\"; exit 0; fi; fi; set -ex; rm -rf temp_simc; git clone --depth 1 --branch \"$REF\" \"$REPO\" temp_simc; commit_hash=$(cd temp_simc && git rev-parse HEAD); cmake -B temp_simc/build temp_simc -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release; cmake --build temp_simc/build --target simc -- -j1; mkdir -p simc; cp temp_simc/build/simc simc/simc; cp -r temp_simc/profiles simc/profiles; echo \"$commit_hash\" > simc/.build-ref; rm -rf temp_simc; chmod +x simc/simc'",
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
   },
