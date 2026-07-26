@@ -347,8 +347,22 @@ async function runSimc(simcData, options = {}) {
             `target_error=${targetError}`
         ];
 
+        console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}`);
+
         await new Promise((resolve, reject) => {
-            execFile(binary, args, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+            execFile(binary, args, {
+                maxBuffer: 1024 * 1024 * 50,
+                timeout: 1000 * 60 * 8
+            }, (error, stdout, stderr) => {
+                if (error) {
+                    console.error(`SimC execution error: code=${error.code || 'none'}, signal=${error.signal || 'none'} ${error.message}`);
+                }
+                if (stdout) {
+                    console.log(`SimC stdout length=${stdout.length}`);
+                }
+                if (stderr) {
+                    console.error(`SimC stderr: ${stderr}`);
+                }
                 if (error) {
                     return reject(new Error(`SimC binary execution failed (${binary}): ${stderr || error.message}`));
                 }
