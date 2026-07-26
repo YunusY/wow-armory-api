@@ -4,7 +4,7 @@ const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const crypto = require('crypto');
 
 if (dns && dns.setDefaultResultOrder) {
@@ -350,21 +350,37 @@ async function runSimc(simcData, options = {}) {
         console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}`);
 
         await new Promise((resolve, reject) => {
-            execFile(binary, args, {
-                maxBuffer: 1024 * 1024 * 50,
+            const child = spawn(binary, args, {
+                stdio: ['ignore', 'pipe', 'pipe'],
                 timeout: 1000 * 60 * 8
-            }, (error, stdout, stderr) => {
-                if (error) {
-                    console.error(`SimC execution error: code=${error.code || 'none'}, signal=${error.signal || 'none'} ${error.message}`);
-                }
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            child.stdout.on('data', (chunk) => {
+                stdout += chunk.toString();
+            });
+
+            child.stderr.on('data', (chunk) => {
+                stderr += chunk.toString();
+            });
+
+            child.on('error', (error) => {
+                console.error(`SimC spawn error: ${error.message}`);
+                reject(new Error(`SimC spawn failed: ${error.message}`));
+            });
+
+            child.on('close', (code, signal) => {
+                console.log(`SimC process closed: code=${code}, signal=${signal}`);
                 if (stdout) {
                     console.log(`SimC stdout length=${stdout.length}`);
                 }
                 if (stderr) {
                     console.error(`SimC stderr: ${stderr}`);
                 }
-                if (error) {
-                    return reject(new Error(`SimC binary execution failed (${binary}): ${stderr || error.message}`));
+                if (code !== 0) {
+                    return reject(new Error(`SimC binary execution failed (${binary}): exit code ${code} signal ${signal}`));
                 }
                 resolve(stdout);
             });
