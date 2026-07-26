@@ -5,6 +5,10 @@ RUN apt-get update && \
         build-essential \
         cmake \
         git \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        pkg-config \
+        zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
