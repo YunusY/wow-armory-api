@@ -324,6 +324,8 @@ async function runSimc(simcData, options = {}) {
 
     const iterations = options.iterations || 1;
     const targetError = options.targetError || 0.2;
+    const threads = options.threads || 1;
+    const statisticsLevel = options.statisticsLevel ?? 0;
     const binary = getSimcBinaryPath();
     const jsonOutputDir = path.dirname(jsonOutputPath);
     const htmlOutputDir = path.dirname(htmlOutputPath);
@@ -348,10 +350,12 @@ async function runSimc(simcData, options = {}) {
             `json2=${jsonOutputPath}`,
             `html=${htmlOutputPath}`,
             `iterations=${iterations}`,
-            `target_error=${targetError}`
+            `target_error=${targetError}`,
+            `threads=${threads}`,
+            `statistics_level=${statisticsLevel}`
         ];
 
-        console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}`);
+        console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}, threads=${threads}, statistics_level=${statisticsLevel}`);
 
         await new Promise((resolve, reject) => {
             const child = spawn(binary, args, {
@@ -421,6 +425,16 @@ async function runSimc(simcData, options = {}) {
         await fsPromises.unlink(simcInputPath).catch(() => {});
         await fsPromises.unlink(jsonOutputPath).catch(() => {});
     }
+}
+
+// Runs at most one SimC process at a time so concurrent requests don't stack
+// their memory footprints on top of each other.
+let simcQueueTail = Promise.resolve();
+
+function enqueueSimc(task) {
+    const resultPromise = simcQueueTail.then(task, task);
+    simcQueueTail = resultPromise.then(() => {}, () => {});
+    return resultPromise;
 }
 
 module.exports = async function handler(req, res) {
@@ -493,10 +507,12 @@ module.exports = async function handler(req, res) {
         const simcData = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
 
         if (runSim) {
-            const simResults = await runSimc(simcData, {
+            const simResults = await enqueueSimc(() => runSimc(simcData, {
                 iterations: Number(req.query.iterations) || 1500,
-                targetError: Number(req.query.target_error) || 0.2
-            });
+                targetError: Number(req.query.target_error) || 0.2,
+                threads: Number(req.query.threads) || 1,
+                statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0
+            }));
 
             return res.status(200).json(simResults);
         }
