@@ -1,9 +1,9 @@
 services:
   - type: web
     name: wow-armory-api
-    env: node
+    env: docker
     branch: main
-    buildCommand: npm install
+    dockerfilePath: Dockerfile
     startCommand: npm start
     envVars:
       - key: BLIZZARD_CLIENT_ID
