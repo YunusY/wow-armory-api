@@ -322,7 +322,7 @@ async function runSimc(simcData, options = {}) {
     const jsonOutputPath = path.join(tempDir, `output_${uniqueId}.json`);
     const htmlOutputPath = path.join(reportsDir, `${uniqueId}.html`);
 
-    const iterations = options.iterations || 1500;
+    const iterations = options.iterations || 1;
     const targetError = options.targetError || 0.2;
     const binary = getSimcBinaryPath();
 
@@ -380,7 +380,13 @@ async function runSimc(simcData, options = {}) {
                     console.error(`SimC stderr: ${stderr}`);
                 }
                 if (code !== 0) {
-                    return reject(new Error(`SimC binary execution failed (${binary}): exit code ${code} signal ${signal}`));
+                    const errorDetails = [];
+                    if (stderr) errorDetails.push(`stderr=${stderr.trim()}`);
+                    if (stdout) errorDetails.push(`stdout=${stdout.trim()}`);
+                    return reject(new Error(
+                        `SimC binary execution failed (${binary}): exit code ${code} signal ${signal}` +
+                        (errorDetails.length ? ` | ${errorDetails.join(' | ')}` : '')
+                    ));
                 }
                 resolve(stdout);
             });
