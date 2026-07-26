@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build-simc": "git clone --depth 1 https://github.com/simulationcraft/simc.git temp_simc && cmake -B temp_simc/build temp_simc -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build temp_simc/build --target simc -- -j1 && mkdir -p simc && cp temp_simc/build/simc simc/simc && cp -r temp_simc/dbc simc/dbc && cp -r temp_simc/profiles simc/profiles && rm -rf temp_simc && chmod +x simc/simc",
+    "build-simc": "bash -lc 'set -ex && git clone --depth 1 https://github.com/simulationcraft/simc.git temp_simc && cmake -B temp_simc/build temp_simc -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build temp_simc/build --target simc -- -j1 && mkdir -p simc && cp temp_simc/build/simc simc/simc && cp -r temp_simc/dbc simc/dbc && cp -r temp_simc/profiles simc/profiles && rm -rf temp_simc && chmod +x simc/simc'",
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
   },
