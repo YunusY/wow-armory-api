@@ -325,6 +325,8 @@ async function runSimc(simcData, options = {}) {
     const iterations = options.iterations || 1;
     const targetError = options.targetError || 0.2;
     const binary = getSimcBinaryPath();
+    const jsonOutputDir = path.dirname(jsonOutputPath);
+    const htmlOutputDir = path.dirname(htmlOutputPath);
 
     if (!binary || !fs.existsSync(binary)) {
         throw new Error(
@@ -334,9 +336,11 @@ async function runSimc(simcData, options = {}) {
     }
 
     console.log(`SimC binary resolved to: ${binary}`);
+    console.log(`Ensuring SimC output directories exist: json=${jsonOutputDir}, html=${htmlOutputDir}`);
 
     try {
-        // FIXED TYPO HERE ('utf-8')
+        await fsPromises.mkdir(jsonOutputDir, { recursive: true });
+        await fsPromises.mkdir(htmlOutputDir, { recursive: true });
         await fsPromises.writeFile(simcInputPath, simcData.combinedSimcText, 'utf-8');
 
         const args = [
