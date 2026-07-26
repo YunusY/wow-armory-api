@@ -11,6 +11,27 @@ if (!fs.existsSync(reportsDir)) {
     fs.mkdirSync(reportsDir, { recursive: true });
 }
 
+console.log(`Reports directory: ${reportsDir}`);
+
+process.on('SIGTERM', () => {
+    console.error('SIGTERM received, shutting down gracefully');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.error('SIGINT received, shutting down gracefully');
+    process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('uncaughtException:', error);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('unhandledRejection:', reason);
+});
+
 // Serve static HTML reports directly if requested
 app.use('/reports', express.static(reportsDir));
 

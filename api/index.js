@@ -326,6 +326,15 @@ async function runSimc(simcData, options = {}) {
     const targetError = options.targetError || 0.2;
     const binary = getSimcBinaryPath();
 
+    if (!binary || !fs.existsSync(binary)) {
+        throw new Error(
+            `SimC binary not found at '${binary}'. ` +
+            `Verify that the build succeeded and set SIMC_PATH to the absolute executable path if needed.`
+        );
+    }
+
+    console.log(`SimC binary resolved to: ${binary}`);
+
     try {
         // FIXED TYPO HERE ('utf-8')
         await fsPromises.writeFile(simcInputPath, simcData.combinedSimcText, 'utf-8');
