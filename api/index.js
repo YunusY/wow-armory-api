@@ -47,7 +47,11 @@ let blizzardToken = null;
 let tokenExpiry = 0;
 
 function getSimcBinaryPath() {
-    if (process.env.SIMC_PATH) return process.env.SIMC_PATH;
+    const simcPath = (process.env.SIMC_PATH || '').trim();
+    if (simcPath) {
+        if (fs.existsSync(simcPath)) return simcPath;
+        console.warn(`SIMC_PATH is set to '${simcPath}' but the file was not found.`);
+    }
 
     const isWindows = process.platform === 'win32';
     const possiblePaths = [
