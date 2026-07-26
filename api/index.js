@@ -49,19 +49,25 @@ let tokenExpiry = 0;
 function getSimcBinaryPath() {
     if (process.env.SIMC_PATH) return process.env.SIMC_PATH;
 
+    const isWindows = process.platform === 'win32';
     const possiblePaths = [
         path.resolve(__dirname, '../simc/simc'),
-        path.resolve(__dirname, '../simc/simc.exe'),
         path.resolve(process.cwd(), 'simc/simc'),
-        path.resolve(process.cwd(), 'simc/simc.exe'),
         '/usr/local/bin/simc'
     ];
+
+    if (isWindows) {
+        possiblePaths.push(
+            path.resolve(__dirname, '../simc/simc.exe'),
+            path.resolve(process.cwd(), 'simc/simc.exe')
+        );
+    }
 
     for (const p of possiblePaths) {
         if (fs.existsSync(p)) return p;
     }
 
-    return 'simc';
+    return isWindows ? 'simc.exe' : 'simc';
 }
 
 function getBlizzardToken(region = 'eu') {
