@@ -1,5 +1,11 @@
 const https = require('https');
 const dns = require('dns');
+const fs = require('fs');
+const fsPromises = require('fs/promises');
+const path = require('path');
+const os = require('os');
+const { execFile } = require('child_process');
+const crypto = require('crypto');
 
 if (dns && dns.setDefaultResultOrder) {
     try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
@@ -20,6 +26,8 @@ const boeItems = [
     "breastplate_of_the_final_defense"
 ];
 
+const healerSpecs = ["restoration", "holy", "preservation", "mistweaver", "discipline"];
+
 const guild_ids = {
     "echo": "1047044",
     "liquid": "1712677"
@@ -33,7 +41,24 @@ const headers = {
 let blizzardToken = null;
 let tokenExpiry = 0;
 
-// Step 1: Get OAuth Token using native IPv4 socket
+function getSimcBinaryPath() {
+    if (process.env.SIMC_PATH) return process.env.SIMC_PATH;
+
+    const possiblePaths = [
+        path.resolve(__dirname, '../simc/simc'),
+        path.resolve(__dirname, '../simc/simc.exe'),
+        path.resolve(process.cwd(), 'simc/simc'),
+        path.resolve(process.cwd(), 'simc/simc.exe'),
+        '/usr/local/bin/simc'
+    ];
+
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) return p;
+    }
+
+    return 'simc';
+}
+
 function getBlizzardToken(region = 'eu') {
     return new Promise((resolve) => {
         if (blizzardToken && Date.now() < tokenExpiry) {
@@ -50,7 +75,7 @@ function getBlizzardToken(region = 'eu') {
             hostname: tokenHost,
             path: '/oauth/token',
             method: 'POST',
-            family: 4, // IPv4 socket override
+            family: 4,
             headers: {
                 'Authorization': `Basic ${auth}`,
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -78,7 +103,6 @@ function getBlizzardToken(region = 'eu') {
     });
 }
 
-// Step 2: Fetch Equipment using native IPv4 socket
 function fetchArmoryEquipment(token, region, realm, character) {
     return new Promise((resolve) => {
         if (!token) return resolve(null);
@@ -91,7 +115,7 @@ function fetchArmoryEquipment(token, region, realm, character) {
             hostname: `${cleanRegion}.api.blizzard.com`,
             path: `/profile/wow/character/${realmSlug}/${nameSlug}/equipment?namespace=profile-${cleanRegion}&locale=en_US`,
             method: 'GET',
-            family: 4, // IPv4 socket override
+            family: 4,
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'User-Agent': headers['User-Agent']
@@ -114,7 +138,6 @@ function fetchArmoryEquipment(token, region, realm, character) {
     });
 }
 
-// Step 3: Extract & Sort Secondary Stats (Crit=32, Haste=36, Vers=40, Mastery=49)
 function extractCraftedStats(armoryItem) {
     if (!armoryItem || !armoryItem.stats) return null;
 
@@ -133,7 +156,6 @@ function extractCraftedStats(armoryItem) {
         }
     }
 
-    // Sort descending by value (Major stat first)
     parsedStats.sort((a, b) => b.value - a.value);
 
     if (parsedStats.length > 0) {
@@ -169,7 +191,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     const slots = ["head", "neck", "shoulder", "back", "chest", "waist", "wrist", "hands", "legs", "feet", "finger1", "finger2", "trinket1", "trinket2", "mainhand", "offhand"];
     
-    // STEP A: IDENTIFY PLAYERS WITH BoE ITEMS
     const playersToFetch = [];
     for (let i = 0; i < 20; i++) {
         if (!data.details.roster[i]) break;
@@ -193,7 +214,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
     }
 
-    // STEP B: FETCH BLIZZARD ARMORY CONCURRENTLY
     const armoryData = {};
     if (playersToFetch.length > 0) {
         const cleanRegion = (region || "eu").toLowerCase();
@@ -209,35 +229,51 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
     }
 
-    // STEP C: BUILD MASTER SIMC TEXT
     let combinedSimcText = "";
+    const playerSimcMap = {};
 
     for (let i = 0; i < 20; i++) {
         if (!data.details.roster[i]) break; 
         const p = data.details.roster[i].character;
 
-        let simc = `${p.class.slug.replaceAll("-", "")}=${p.name}\nlevel=90\nrace=${p.race.slug.replaceAll("-", "_")}\nspec=${p.spec.name.toLowerCase().replaceAll("-", "_")}\ntalents=${p.talentLoadout.exportLoadoutText}\n`;
+        const cleanClass = p.class.slug.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const cleanRace = p.race.slug.toLowerCase().replace(/[\s-]+/g, "_");
+        const cleanSpec = p.spec.name.toLowerCase().trim().replace(/[\s-]+/g, "_");
+
+        const isHealer = (p.spec.role && p.spec.role.toLowerCase() === 'healer') || healerSpecs.includes(cleanSpec);
+        if (isHealer) continue;
+
+        let playerSimc = `${cleanClass}=${p.name}\nlevel=90\nrace=${cleanRace}\nspec=${cleanSpec}\n`;
+        if (p.talentLoadout && p.talentLoadout.exportLoadoutText) {
+            playerSimc += `talents=${p.talentLoadout.exportLoadoutText}\n`;
+        }
+
         const items = p.items.items;
 
         for (const slot of slots) {
             const item = items[slot];
             if (item) {
-                const itemName = item.name.replace(/'/g, "").replace(/ /g, "_");
+                const itemName = item.name.replace(/'/g, "").replace(/[^a-zA-Z0-9_]/g, "_");
                 const isBoe = boeItems.some(boe => itemName.toLowerCase().includes(boe));
 
-                if (slot === "mainhand" || slot === "offhand") {
-                    simc += `${slot === "mainhand" ? "main_hand" : "off_hand"}=${itemName},id=${item.item_id}`;
-                } else {
-                    simc += `${slot}=${itemName},id=${item.item_id}`;
+                const simcSlot = (slot === "mainhand") ? "main_hand" : (slot === "offhand") ? "off_hand" : slot;
+                let itemLine = `${simcSlot}=${itemName},id=${item.item_id}`;
+
+                if (item.enchant) {
+                    const cleanEnchant = String(item.enchant).trim();
+                    if (/^\d+$/.test(cleanEnchant)) itemLine += `,enchant_id=${cleanEnchant}`;
                 }
 
-                if (item.enchant) simc += `,enchant_id=${item.enchant}`;
-                if (item.gems && item.gems.length > 0) simc += `,gem_id=${item.gems.join("/")}`;
-                
-                let bonusStr = item.bonuses && item.bonuses.length > 0 ? item.bonuses.join("/") : "";
-                if (bonusStr) simc += `,bonus_id=${bonusStr}`;
+                if (item.gems && Array.isArray(item.gems) && item.gems.length > 0) {
+                    const validGems = item.gems.map(g => String(g).trim()).filter(g => /^\d+$/.test(g));
+                    if (validGems.length > 0) itemLine += `,gem_id=${validGems.join('/')}`;
+                }
 
-                // Parse EXACT stats directly from Armory
+                if (item.bonuses && Array.isArray(item.bonuses) && item.bonuses.length > 0) {
+                    const validBonuses = item.bonuses.map(b => String(b).trim()).filter(b => /^\d+$/.test(b));
+                    if (validBonuses.length > 0) itemLine += `,bonus_id=${validBonuses.join('/')}`;
+                }
+
                 if (isBoe && armoryData[i]) {
                     const baseSlot = slot.replace(/\d+$/, "").toUpperCase();
                     const armoryItem = armoryData[i].find(ai => 
@@ -246,18 +282,86 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
                     );
 
                     const craftedStats = extractCraftedStats(armoryItem);
-                    if (craftedStats) {
-                        simc += `,crafted_stats=${craftedStats}`;
-                    }
+                    if (craftedStats) itemLine += `,crafted_stats=${craftedStats}`;
                 }
 
-                simc += "\n";
+                playerSimc += itemLine + "\n";
             }
         }
-        combinedSimcText += simc + "\n\n";
+
+        playerSimcMap[p.name.toLowerCase()] = playerSimc.trim();
+        combinedSimcText += playerSimc + "\n\n";
     }
     
-    return combinedSimcText.trim();
+    return {
+        combinedSimcText: combinedSimcText.trim(),
+        playerSimcMap
+    };
+}
+
+async function runSimc(simcData, options = {}) {
+    const uniqueId = crypto.randomUUID();
+    const tempDir = os.tmpdir();
+    
+    const reportsDir = path.resolve(process.cwd(), 'public/reports');
+    if (!fs.existsSync(reportsDir)) {
+        fs.mkdirSync(reportsDir, { recursive: true });
+    }
+
+    const simcInputPath = path.join(tempDir, `input_${uniqueId}.simc`);
+    const jsonOutputPath = path.join(tempDir, `output_${uniqueId}.json`);
+    const htmlOutputPath = path.join(reportsDir, `${uniqueId}.html`);
+
+    const iterations = options.iterations || 1500;
+    const targetError = options.targetError || 0.2;
+    const binary = getSimcBinaryPath();
+
+    try {
+        // FIXED TYPO HERE ('utf-8')
+        await fsPromises.writeFile(simcInputPath, simcData.combinedSimcText, 'utf-8');
+
+        const args = [
+            simcInputPath,
+            `json2=${jsonOutputPath}`,
+            `html=${htmlOutputPath}`,
+            `iterations=${iterations}`,
+            `target_error=${targetError}`
+        ];
+
+        await new Promise((resolve, reject) => {
+            execFile(binary, args, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+                if (error) {
+                    return reject(new Error(`SimC binary execution failed (${binary}): ${stderr || error.message}`));
+                }
+                resolve(stdout);
+            });
+        });
+
+        const rawJson = await fsPromises.readFile(jsonOutputPath, 'utf-8');
+        const parsedJson = JSON.parse(rawJson);
+
+        const players = (parsedJson?.sim?.players || []).map(p => ({
+            name: p.name,
+            spec: p.spec,
+            class: p.class,
+            dps: Math.round(p.collected_data?.dps?.mean || p.dps?.mean || 0)
+        }));
+
+        const totalDps = players.reduce((sum, p) => sum + p.dps, 0);
+
+        return {
+            reportId: uniqueId,
+            reportUrl: `/api/get-simc?report=${uniqueId}`,
+            iterations,
+            totalDps,
+            playerCount: players.length,
+            players
+        };
+
+    } finally {
+        await fsPromises.unlink(simcInputPath).catch(() => {});
+        await fsPromises.unlink(jsonOutputPath).catch(() => {});
+    }
 }
 
 module.exports = async function handler(req, res) {
@@ -265,6 +369,28 @@ module.exports = async function handler(req, res) {
 
     try {
         const clean = (val) => (val === 'undefined' || val === 'null' || val === '') ? undefined : val;
+
+        // -------------------------------------------------------------
+        // NEW FIX: Serve HTML Report if `?report=<ID>` parameter exists
+        // -------------------------------------------------------------
+        let reportId = clean(req.query.report);
+        if (reportId) {
+            // Prevent directory traversal attacks
+            const safeReportId = path.basename(reportId).replace(/[^a-zA-Z0-9-]/g, '');
+            const htmlPath = path.resolve(process.cwd(), 'public/reports', `${safeReportId}.html`);
+
+            if (fs.existsSync(htmlPath)) {
+                const htmlContent = await fsPromises.readFile(htmlPath, 'utf-8');
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                return res.status(200).send(htmlContent);
+            } else {
+                return res.status(404).json({ error: 'Report not found or expired.' });
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Standard Sim Generation Flow
+        // -------------------------------------------------------------
         let raid = clean(req.query.raid);
         let boss = clean(req.query.boss);
         let difficulty = clean(req.query.difficulty);
@@ -273,6 +399,12 @@ module.exports = async function handler(req, res) {
         let guild = clean(req.query.guild);
         let period = clean(req.query.period);
         let pullId = clean(req.query.pullId);
+
+        let runSim = req.query.sim === 'true' || 
+             req.query.simc === 'true' || 
+             req.query.sim === '1' || 
+             req.query.simc === '1' || 
+             req.query.format === 'html';
 
         const missingParams = [];
         if (!raid) missingParams.push("raid");
@@ -299,10 +431,19 @@ module.exports = async function handler(req, res) {
             pullId = await getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
         }
 
-        const simcText = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
+        const simcData = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
+
+        if (runSim) {
+            const simResults = await runSimc(simcData, {
+                iterations: Number(req.query.iterations) || 1500,
+                targetError: Number(req.query.target_error) || 0.2
+            });
+
+            return res.status(200).json(simResults);
+        }
 
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        return res.status(200).send(simcText);
+        return res.status(200).send(simcData.combinedSimcText);
 
     } catch (error) {
         return res.status(500).json({ error: error.message });
