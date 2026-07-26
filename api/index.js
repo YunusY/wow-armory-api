@@ -38,6 +38,11 @@ const headers = {
     "Accept": "application/json"
 };
 
+const reportsDir = process.env.REPORTS_DIR || path.join(os.tmpdir(), 'wow-armory-api-reports');
+if (!fs.existsSync(reportsDir)) {
+    fs.mkdirSync(reportsDir, { recursive: true });
+}
+
 let blizzardToken = null;
 let tokenExpiry = 0;
 
@@ -302,11 +307,6 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 async function runSimc(simcData, options = {}) {
     const uniqueId = crypto.randomUUID();
     const tempDir = os.tmpdir();
-    
-    const reportsDir = path.resolve(process.cwd(), 'public/reports');
-    if (!fs.existsSync(reportsDir)) {
-        fs.mkdirSync(reportsDir, { recursive: true });
-    }
 
     const simcInputPath = path.join(tempDir, `input_${uniqueId}.simc`);
     const jsonOutputPath = path.join(tempDir, `output_${uniqueId}.json`);
@@ -377,7 +377,7 @@ module.exports = async function handler(req, res) {
         if (reportId) {
             // Prevent directory traversal attacks
             const safeReportId = path.basename(reportId).replace(/[^a-zA-Z0-9-]/g, '');
-            const htmlPath = path.resolve(process.cwd(), 'public/reports', `${safeReportId}.html`);
+            const htmlPath = path.join(reportsDir, `${safeReportId}.html`);
 
             if (fs.existsSync(htmlPath)) {
                 const htmlContent = await fsPromises.readFile(htmlPath, 'utf-8');

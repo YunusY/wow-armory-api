@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: wow-armory-api
+    env: node
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: BLIZZARD_CLIENT_ID
+      - key: BLIZZARD_CLIENT_SECRET
+      - key: SIMC_PATH
+      - key: REPORTS_DIR
