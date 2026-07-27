@@ -246,9 +246,10 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     let combinedSimcText = "";
     const playerSimcMap = {};
+    const augmentationEvokers = [];
 
     for (let i = 0; i < 20; i++) {
-        if (!data.details.roster[i]) break; 
+        if (!data.details.roster[i]) break;
         const p = data.details.roster[i].character;
 
         const cleanClass = p.class.slug.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -257,6 +258,10 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
         const isHealer = (p.spec.role && p.spec.role.toLowerCase() === 'healer') || healerSpecs.includes(cleanSpec);
         if (isHealer) continue;
+
+        if (cleanClass === 'evoker' && cleanSpec === 'augmentation') {
+            augmentationEvokers.push(p.name);
+        }
 
         let playerSimc = `${cleanClass}=${p.name}\nlevel=90\nrace=${cleanRace}\nspec=${cleanSpec}\n`;
         if (p.talentLoadout && p.talentLoadout.exportLoadoutText) {
@@ -310,8 +315,18 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
     
     return {
         combinedSimcText: combinedSimcText.trim(),
-        playerSimcMap
+        playerSimcMap,
+        augmentationEvokers
     };
+}
+
+// Rebuilds the combined SimC text from the per-player blocks, marking the
+// given (lowercase) player names as sleeping so they contribute no damage
+// or buffs to the sim.
+function buildCombinedSimcText(playerSimcMap, sleepingNames = new Set()) {
+    return Object.entries(playerSimcMap)
+        .map(([name, block]) => sleepingNames.has(name) ? `${block}\nsleeping=1` : block)
+        .join('\n\n');
 }
 
 async function runSimc(simcData, options = {}) {
@@ -326,6 +341,7 @@ async function runSimc(simcData, options = {}) {
     const targetError = options.targetError || 0.2;
     const threads = options.threads || 1;
     const statisticsLevel = options.statisticsLevel ?? 0;
+    const seed = options.seed;
     const binary = getSimcBinaryPath();
     const jsonOutputDir = path.dirname(jsonOutputPath);
     const htmlOutputDir = path.dirname(htmlOutputPath);
@@ -354,8 +370,9 @@ async function runSimc(simcData, options = {}) {
             `threads=${threads}`,
             `statistics_level=${statisticsLevel}`
         ];
+        if (seed) args.push(`seed=${seed}`);
 
-        console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}, threads=${threads}, statistics_level=${statisticsLevel}`);
+        console.log(`Starting SimC run: binary=${binary}, iterations=${iterations}, target_error=${targetError}, threads=${threads}, statistics_level=${statisticsLevel}, seed=${seed || '(random)'}`);
 
         await new Promise((resolve, reject) => {
             const child = spawn(binary, args, {
@@ -507,13 +524,54 @@ module.exports = async function handler(req, res) {
         const simcData = await getSimcPull(raid, boss, difficulty, region, realm, guild, guild_id, pullId);
 
         if (runSim) {
-            const simResults = await enqueueSimc(() => runSimc(simcData, {
+            const simOptions = {
                 iterations: Number(req.query.iterations) || 1500,
                 targetError: Number(req.query.target_error) || 0.2,
                 threads: Number(req.query.threads) || 1,
-                statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0
-            }));
+                statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0,
+                // Shared across every sub-sim of a request so unrelated raid
+                // members roll identically each time - only the evoker(s)
+                // being awake/asleep should move the totals.
+                seed: Math.floor(Math.random() * 1_000_000_000)
+            };
 
+            if (simcData.augmentationEvokers.length > 0) {
+                const evokerNames = simcData.augmentationEvokers.map(n => n.toLowerCase());
+                const allSleeping = new Set(evokerNames);
+
+                const baselineText = buildCombinedSimcText(simcData.playerSimcMap, allSleeping);
+                const baseline = await enqueueSimc(() => runSimc({ combinedSimcText: baselineText }, simOptions));
+
+                const evokers = [];
+                for (const evokerName of simcData.augmentationEvokers) {
+                    const lowerName = evokerName.toLowerCase();
+                    const sleeping = new Set(evokerNames.filter(n => n !== lowerName));
+                    const variantText = buildCombinedSimcText(simcData.playerSimcMap, sleeping);
+                    const variant = await enqueueSimc(() => runSimc({ combinedSimcText: variantText }, simOptions));
+
+                    evokers.push({
+                        name: evokerName,
+                        totalDpsWithThisEvokerAwake: variant.totalDps,
+                        contribution: variant.totalDps - baseline.totalDps,
+                        reportUrl: variant.reportUrl,
+                        players: variant.players
+                    });
+                }
+
+                return res.status(200).json({
+                    reportType: 'augmentation-multi',
+                    iterations: simOptions.iterations,
+                    seed: simOptions.seed,
+                    baseline: {
+                        totalDps: baseline.totalDps,
+                        reportUrl: baseline.reportUrl,
+                        players: baseline.players
+                    },
+                    evokers
+                });
+            }
+
+            const simResults = await enqueueSimc(() => runSimc(simcData, simOptions));
             return res.status(200).json(simResults);
         }
 
