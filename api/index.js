@@ -246,6 +246,7 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
 
     let combinedSimcText = "";
     const playerSimcMap = {};
+    const playerMeta = {};
     const augmentationEvokers = [];
 
     for (let i = 0; i < 20; i++) {
@@ -310,12 +311,18 @@ async function getSimcPull(raid, boss, difficulty, region, realm, guild, guild_i
         }
 
         playerSimcMap[p.name.toLowerCase()] = playerSimc.trim();
+        playerMeta[p.name.toLowerCase()] = {
+            realm: (p.realm && p.realm.slug) ? p.realm.slug : realm,
+            class: cleanClass,
+            spec: cleanSpec
+        };
         combinedSimcText += playerSimc + "\n\n";
     }
-    
+
     return {
         combinedSimcText: combinedSimcText.trim(),
         playerSimcMap,
+        playerMeta,
         augmentationEvokers
     };
 }
@@ -420,12 +427,23 @@ async function runSimc(simcData, options = {}) {
         const rawJson = await fsPromises.readFile(jsonOutputPath, 'utf-8');
         const parsedJson = JSON.parse(rawJson);
 
-        const players = (parsedJson?.sim?.players || []).map(p => ({
-            name: p.name,
-            spec: p.spec,
-            class: p.class,
-            dps: Math.round(p.collected_data?.dps?.mean || p.dps?.mean || 0)
-        }));
+        const players = (parsedJson?.sim?.players || []).map(p => {
+            const meta = simcData.playerMeta?.[p.name.toLowerCase()] || {};
+
+            const gearItems = Object.values(p.gear || {}).filter(item => item && typeof item.ilevel === 'number');
+            const ilevel = gearItems.length
+                ? Math.round(gearItems.reduce((sum, item) => sum + item.ilevel, 0) / gearItems.length)
+                : null;
+
+            return {
+                name: p.name,
+                realm: meta.realm ?? null,
+                class: meta.class ?? null,
+                spec: meta.spec ?? null,
+                ilevel,
+                dps: Math.round(p.collected_data?.dps?.mean || p.dps?.mean || 0)
+            };
+        });
 
         const totalDps = players.reduce((sum, p) => sum + p.dps, 0);
 
@@ -540,14 +558,14 @@ module.exports = async function handler(req, res) {
                 const allSleeping = new Set(evokerNames);
 
                 const baselineText = buildCombinedSimcText(simcData.playerSimcMap, allSleeping);
-                const baseline = await enqueueSimc(() => runSimc({ combinedSimcText: baselineText }, simOptions));
+                const baseline = await enqueueSimc(() => runSimc({ combinedSimcText: baselineText, playerMeta: simcData.playerMeta }, simOptions));
 
                 const evokers = [];
                 for (const evokerName of simcData.augmentationEvokers) {
                     const lowerName = evokerName.toLowerCase();
                     const sleeping = new Set(evokerNames.filter(n => n !== lowerName));
                     const variantText = buildCombinedSimcText(simcData.playerSimcMap, sleeping);
-                    const variant = await enqueueSimc(() => runSimc({ combinedSimcText: variantText }, simOptions));
+                    const variant = await enqueueSimc(() => runSimc({ combinedSimcText: variantText, playerMeta: simcData.playerMeta }, simOptions));
 
                     evokers.push({
                         name: evokerName,
