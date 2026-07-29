@@ -30,7 +30,8 @@ const healerSpecs = ["restoration", "holy", "preservation", "mistweaver", "disci
 
 const guild_ids = {
     "echo": "1047044",
-    "liquid": "1712677"
+    "liquid": "1712677",
+    "method": "316123"
 };
 
 const headers = {

@@ -13,7 +13,7 @@ Pulls a guild's most recent raid pull from Raider.IO, builds a SimC profile for 
 | `difficulty` | `mythic` | |
 | `region` | `eu` / `us` | |
 | `realm` | `tarren-mill` | |
-| `guild` | `echo` / `liquid` | must be a key in `guild_ids` |
+| `guild` | `echo` / `liquid` / `method` | must be a key in `guild_ids` |
 
 ## Optional query params
 
