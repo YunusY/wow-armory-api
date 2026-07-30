@@ -5,6 +5,7 @@ const path = require('path');
 const engine = require('../lib/simcEngine');
 const { getGuild } = require('../lib/guilds');
 const tracker = require('../lib/simTracker');
+const statusLog = require('../lib/statusLog');
 
 module.exports = async function handler(req, res) {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method Not Allowed' });
@@ -74,61 +75,70 @@ module.exports = async function handler(req, res) {
                 pullId = await engine.getRecentPullId(raid, boss, difficulty, region, realm, guild, period);
             }
 
-            const simcData = await engine.getSimcPull(raid, boss, difficulty, region, realm, guild, tracked.guildId, pullId);
+            statusLog.log('on_demand_started', { guild, raid, boss, difficulty, region, realm, pullId });
 
-            const simOptions = {
-                iterations: Number(req.query.iterations) || 1500,
-                targetError: Number(req.query.target_error) || 0.2,
-                threads: Number(req.query.threads) || 1,
-                statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0,
-                // Shared across every sub-sim of this request so unrelated raid
-                // members roll identically each time - only the evoker(s)
-                // being awake/asleep should move the totals.
-                seed: Math.floor(Math.random() * 1_000_000_000)
-            };
+            try {
+                const simcData = await engine.getSimcPull(raid, boss, difficulty, region, realm, guild, tracked.guildId, pullId);
 
-            if (simcData.augmentationEvokers.length > 0) {
-                const evokerNames = simcData.augmentationEvokers.map(n => n.toLowerCase());
-                const allSleeping = new Set(evokerNames);
+                const simOptions = {
+                    iterations: Number(req.query.iterations) || 1500,
+                    targetError: Number(req.query.target_error) || 0.2,
+                    threads: Number(req.query.threads) || 1,
+                    statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0,
+                    // Shared across every sub-sim of this request so unrelated raid
+                    // members roll identically each time - only the evoker(s)
+                    // being awake/asleep should move the totals.
+                    seed: Math.floor(Math.random() * 1_000_000_000)
+                };
 
-                const baselineText = engine.buildCombinedSimcText(simcData.playerSimcMap, allSleeping);
-                const baseline = await engine.enqueueSimcPriority(() => engine.runSimc(
-                    { combinedSimcText: baselineText, playerMeta: simcData.playerMeta }, simOptions
-                ));
+                if (simcData.augmentationEvokers.length > 0) {
+                    const evokerNames = simcData.augmentationEvokers.map(n => n.toLowerCase());
+                    const allSleeping = new Set(evokerNames);
 
-                const evokers = [];
-                for (const evokerName of simcData.augmentationEvokers) {
-                    const lowerName = evokerName.toLowerCase();
-                    const sleeping = new Set(evokerNames.filter(n => n !== lowerName));
-                    const variantText = engine.buildCombinedSimcText(simcData.playerSimcMap, sleeping);
-                    const variant = await engine.enqueueSimcPriority(() => engine.runSimc(
-                        { combinedSimcText: variantText, playerMeta: simcData.playerMeta }, simOptions
+                    const baselineText = engine.buildCombinedSimcText(simcData.playerSimcMap, allSleeping);
+                    const baseline = await engine.enqueueSimcPriority(() => engine.runSimc(
+                        { combinedSimcText: baselineText, playerMeta: simcData.playerMeta }, simOptions
                     ));
 
-                    evokers.push({
-                        name: evokerName,
-                        totalDpsWithThisEvokerAwake: variant.totalDps,
-                        contribution: variant.totalDps - baseline.totalDps,
-                        reportUrl: variant.reportUrl,
-                        players: variant.players
+                    const evokers = [];
+                    for (const evokerName of simcData.augmentationEvokers) {
+                        const lowerName = evokerName.toLowerCase();
+                        const sleeping = new Set(evokerNames.filter(n => n !== lowerName));
+                        const variantText = engine.buildCombinedSimcText(simcData.playerSimcMap, sleeping);
+                        const variant = await engine.enqueueSimcPriority(() => engine.runSimc(
+                            { combinedSimcText: variantText, playerMeta: simcData.playerMeta }, simOptions
+                        ));
+
+                        evokers.push({
+                            name: evokerName,
+                            totalDpsWithThisEvokerAwake: variant.totalDps,
+                            contribution: variant.totalDps - baseline.totalDps,
+                            reportUrl: variant.reportUrl,
+                            players: variant.players
+                        });
+                    }
+
+                    statusLog.log('on_demand_complete', { guild, raid, boss, pullId });
+                    return res.status(200).json({
+                        reportType: 'augmentation-multi',
+                        iterations: simOptions.iterations,
+                        seed: simOptions.seed,
+                        baseline: {
+                            totalDps: baseline.totalDps,
+                            reportUrl: baseline.reportUrl,
+                            players: baseline.players
+                        },
+                        evokers
                     });
                 }
 
-                return res.status(200).json({
-                    reportType: 'augmentation-multi',
-                    iterations: simOptions.iterations,
-                    seed: simOptions.seed,
-                    baseline: {
-                        totalDps: baseline.totalDps,
-                        reportUrl: baseline.reportUrl,
-                        players: baseline.players
-                    },
-                    evokers
-                });
+                const simResults = await engine.enqueueSimcPriority(() => engine.runSimc(simcData, simOptions));
+                statusLog.log('on_demand_complete', { guild, raid, boss, pullId });
+                return res.status(200).json(simResults);
+            } catch (err) {
+                statusLog.log('on_demand_failed', { guild, raid, boss, pullId, error: err.message });
+                throw err;
             }
-
-            const simResults = await engine.enqueueSimcPriority(() => engine.runSimc(simcData, simOptions));
-            return res.status(200).json(simResults);
         }
 
         // -------------------------------------------------------------

@@ -57,3 +57,9 @@ Response shape: `{ reportId, reportUrl, iterations, totalDps, playerCount, playe
 `GET /api/get-simc` with no `sim`/`simc`/`format=html` flag returns the raw combined `.simc` profile text for a pull — live/synchronous per request, no sim run. Takes the same params as on-demand mode above (minus `iterations`/`target_error`/`threads`/`statistics_level`, which don't apply).
 
 Errors return `{ "error": "..." }` with a 4xx/5xx status.
+
+## Status
+
+`GET /api/status` — JSON: `{ now, log: [...] }`, a rolling log (newest first, up to 200 entries) of background cycle activity and on-demand requests. Each entry: `{ timestamp, event, detail }`. Events: `cycle_started`, `roster_fetched`, `baseline_batch_complete`, `evoker_batch_complete`, `cycle_complete`, `cycle_failed`, `on_demand_started`, `on_demand_complete`, `on_demand_failed`. The tail of the log doubles as "what's happening right now" — e.g. a `cycle_started` for a guild with no matching `cycle_complete`/`cycle_failed` yet means that guild's batch is still running. Not persisted to disk — resets on restart, same as any live activity feed.
+
+`GET /status` — the same data as a plain auto-refreshing (5s) HTML page, for checking on it from a browser.

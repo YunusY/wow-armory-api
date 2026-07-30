@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const handler = require('./api/index.js');
+const status = require('./api/status.js');
 const tracker = require('./lib/simTracker.js');
 
 const app = express();
@@ -67,6 +68,10 @@ app.use('/reports', express.static(reportsDir));
 
 // Route for simulation API
 app.get('/api/get-simc', handler);
+
+// Status: raw JSON for scripts/monitoring, a plain auto-refreshing page for humans
+app.get('/api/status', status.jsonHandler);
+app.get('/status', status.htmlHandler);
 
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
