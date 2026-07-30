@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const handler = require('./api/index.js');
+const tracker = require('./lib/simTracker.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,15 +14,44 @@ if (!fs.existsSync(reportsDir)) {
 
 console.log(`Reports directory: ${reportsDir}`);
 
-process.on('SIGTERM', () => {
-    console.error('SIGTERM received, shutting down gracefully');
-    process.exit(0);
-});
+const CYCLE_INTERVAL_MS = 5 * 60 * 1000;
+let cycleRunning = false;
 
-process.on('SIGINT', () => {
-    console.error('SIGINT received, shutting down gracefully');
+async function runCycleSafely() {
+    if (cycleRunning) {
+        console.warn('simTracker: previous cycle still running, skipping this tick');
+        return;
+    }
+    cycleRunning = true;
+    try {
+        await tracker.runAllGuildCycles();
+    } catch (error) {
+        console.error('simTracker: unexpected cycle error', error);
+    } finally {
+        cycleRunning = false;
+    }
+}
+
+tracker.load();
+runCycleSafely();
+const cycleTimer = setInterval(runCycleSafely, CYCLE_INTERVAL_MS);
+
+let shuttingDown = false;
+async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`${signal} received, shutting down gracefully`);
+    clearInterval(cycleTimer);
+    try {
+        await tracker.persist();
+    } catch (error) {
+        console.error('flush on shutdown failed:', error);
+    }
     process.exit(0);
-});
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('uncaughtException', (error) => {
     console.error('uncaughtException:', error);
@@ -38,6 +68,12 @@ app.use('/reports', express.static(reportsDir));
 // Route for simulation API
 app.get('/api/get-simc', handler);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
+// Node 18+ defaults http.Server.requestTimeout to 300000ms (5 min), which
+// used to collide with the old synchronous multi-minute sim runs. sim=true
+// is now an instant cache read, but keep a generous explicit timeout anyway
+// to protect the still-live plain-text export path.
+server.requestTimeout = 10 * 60 * 1000;

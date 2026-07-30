@@ -10,3 +10,10 @@ services:
       - key: BLIZZARD_CLIENT_SECRET
       - key: SIMC_PATH
       - key: REPORTS_DIR
+        value: /var/data/reports
+      - key: CACHE_DIR
+        value: /var/data/cache
+    disks:
+      - name: wow-armory-data
+        mountPath: /var/data
+        sizeGB: 1
