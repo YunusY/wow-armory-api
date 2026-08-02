@@ -32,16 +32,15 @@ module.exports = async function handler(req, res) {
         }
 
         // -------------------------------------------------------------
-        // sim=true with no other params: instant read of the continuously-
-        // accumulated cache, covering every tracked guild at once.
+        // sim=true with no other params: instant read of the pull-backlog
+        // worker's accumulated history, covering every tracked guild at once.
         //
         // sim=true WITH a full raid/boss/difficulty/region/realm/guild set:
-        // the old on-demand behavior — sim whatever pull that describes
-        // (any boss, any historical pullId), right now. This preempts
-        // whatever background batch is currently running (via
-        // enqueueSimcPriority, which cancels it) so the on-demand request
-        // doesn't wait behind it; the background loop just picks its
-        // interrupted guild back up on its next tick.
+        // the on-demand mode — sim whatever pull that describes (any boss,
+        // any historical pullId), right now. This preempts whatever pull the
+        // background worker is currently mid-sim on (via enqueueSimcPriority,
+        // which cancels it) so the on-demand request doesn't wait behind it;
+        // the worker just retries that same pull on its next pass.
         // -------------------------------------------------------------
         const runSim = req.query.sim === 'true' ||
              req.query.simc === 'true' ||
@@ -61,7 +60,8 @@ module.exports = async function handler(req, res) {
 
             const hasFullParams = raid && boss && difficulty && region && realm && guild;
             if (!hasFullParams) {
-                return res.status(200).json({ guilds: tracker.getAllGuildsView() });
+                const limit = clean(req.query.limit);
+                return res.status(200).json({ guilds: tracker.getAllGuildsView(limit) });
             }
 
             const tracked = getGuild(guild);
@@ -80,9 +80,14 @@ module.exports = async function handler(req, res) {
             try {
                 const simcData = await engine.getSimcPull(raid, boss, difficulty, region, realm, guild, tracked.guildId, pullId);
 
+                // Default 100, hard-capped at 1000. target_error is
+                // intentionally never passed here — it makes SimC keep
+                // running past `iterations` to converge, which would silently
+                // defeat the cap. iterations is the sole, exact compute knob.
+                const rawIterations = Number(req.query.iterations) || 100;
+                const iterations = Math.min(1000, Math.max(1, rawIterations));
                 const simOptions = {
-                    iterations: Number(req.query.iterations) || 1500,
-                    targetError: Number(req.query.target_error) || 0.2,
+                    iterations,
                     threads: Number(req.query.threads) || 1,
                     statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0,
                     // Shared across every sub-sim of this request so unrelated raid

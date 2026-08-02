@@ -14,18 +14,16 @@ function escapeHtml(value) {
 }
 
 const EVENT_LABELS = {
-    cycle_started: 'cycle started',
-    roster_fetched: 'roster fetched',
-    baseline_batch_complete: 'baseline batch complete',
-    evoker_batch_complete: 'evoker batch complete',
-    cycle_complete: 'cycle complete',
-    cycle_failed: 'cycle failed',
+    manifest_refreshed: 'manifest refreshed',
+    manifest_refresh_failed: 'manifest refresh failed',
+    pull_sim_started: 'pull sim started',
+    pull_simmed: 'pull simmed',
+    pull_sim_failed: 'pull sim failed',
+    pull_sim_skipped: 'pull skipped (unsimmable)',
     on_demand_started: 'on-demand sim started',
     on_demand_complete: 'on-demand sim complete',
     on_demand_failed: 'on-demand sim failed'
 };
-
-const RUNNING_EVENTS = new Set(['cycle_started', 'roster_fetched', 'baseline_batch_complete', 'evoker_batch_complete']);
 
 function timeAgo(iso) {
     if (!iso) return 'never';
@@ -40,60 +38,63 @@ function timeAgo(iso) {
 }
 
 // Derives each tracked guild's current state by walking the activity log
-// (newest first) for the most recent entry that mentions it.
-function computeGuildActivity(guildKey, log) {
+// (newest first) for the most recent entry that mentions it. The log is
+// in-memory only and empty right after a restart — falls back to the
+// persisted view (backlog/history) so a guild that's actually caught up
+// (or has a known backlog) doesn't misleadingly read as "no data" just
+// because nothing's been logged yet in this process's lifetime.
+function computeGuildActivity(guildKey, log, view) {
     for (const entry of log) {
         if (!entry.detail || entry.detail.guild !== guildKey) continue;
-        if (RUNNING_EVENTS.has(entry.event)) {
-            return { state: 'running', label: EVENT_LABELS[entry.event], since: entry.timestamp };
+        if (entry.event === 'pull_sim_started') {
+            return { state: 'running', label: 'simming pull', since: entry.timestamp };
         }
-        if (entry.event === 'cycle_complete') {
+        if (entry.event === 'pull_simmed' || entry.event === 'pull_sim_skipped') {
             return { state: 'ok', since: entry.timestamp };
         }
-        if (entry.event === 'cycle_failed') {
-            const cancelled = /cancelled/i.test(entry.detail.error || '');
-            return { state: cancelled ? 'preempted' : 'error', since: entry.timestamp, error: entry.detail.error };
+        if (entry.event === 'pull_sim_failed') {
+            return {
+                state: entry.detail.cancelled ? 'preempted' : 'error',
+                since: entry.timestamp,
+                error: entry.detail.error
+            };
         }
+    }
+    if (view.lastActivityAt) {
+        return { state: view.backlog > 0 ? 'idle' : 'ok', since: view.lastActivityAt };
     }
     return { state: 'unknown' };
 }
 
-function iterationsRange(players) {
-    if (!players.length) return null;
-    const values = players.map(p => p.iterations || 0);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    return min === max ? `${min}` : `${min}–${max}`;
-}
-
 function summarizeGuildView(view) {
-    if (view.reportType === 'augmentation-multi') {
-        return {
-            totalDps: view.baseline.totalDps,
-            playerCount: view.baseline.players.length,
-            iterationsLabel: String(view.iterations),
-            evokers: view.evokers.slice().sort((a, b) => b.contribution - a.contribution)
-        };
-    }
+    const latest = view.history[0] || null;
     return {
-        totalDps: view.totalDps,
-        playerCount: view.playerCount,
-        iterationsLabel: iterationsRange(view.players) || '0',
-        evokers: []
+        backlog: view.backlog,
+        currentIterations: view.currentIterations,
+        latestBoss: latest ? latest.boss : null,
+        latestTotalDps: latest ? latest.totalDps : null,
+        latestPlayerCount: latest ? latest.playerCount : null,
+        evokers: latest ? latest.evokers.slice().sort((a, b) => b.contribution - a.contribution) : []
     };
 }
 
 const STATE_META = {
     running: { dot: 'run', label: 'Running' },
     ok: { dot: 'ok', label: 'Up to date' },
+    idle: { dot: 'ok', label: 'Idle' },
     preempted: { dot: 'warn', label: 'Preempted' },
     error: { dot: 'err', label: 'Error' },
     unknown: { dot: 'unk', label: 'No data yet' }
 };
 
+function prettifySlug(slug) {
+    if (!slug) return null;
+    return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 function renderGuildCard(guildKey, log) {
-    const view = tracker.getGuildView(guildKey);
-    const activity = computeGuildActivity(guildKey, log);
+    const view = tracker.getGuildView(guildKey, 1);
+    const activity = computeGuildActivity(guildKey, log, view);
     const summary = summarizeGuildView(view);
     const meta = STATE_META[activity.state];
 
@@ -111,18 +112,25 @@ function renderGuildCard(guildKey, log) {
                 ? `preempted by an on-demand request · ${timeAgo(activity.since)}`
                 : activity.state === 'ok'
                     ? `updated ${timeAgo(activity.since)}`
-                    : 'waiting on first cycle';
+                    : activity.state === 'idle'
+                        ? `idle · last active ${timeAgo(activity.since)}`
+                        : 'waiting on first pull';
+
+    const bossName = prettifySlug(summary.latestBoss);
 
     return `
     <div class="card">
         <div class="card-head">
-            <h2>${escapeHtml(guildKey)}</h2>
+            <div>
+                <h2>${escapeHtml(guildKey)}</h2>
+                ${bossName ? `<div class="boss">${escapeHtml(bossName)}</div>` : ''}
+            </div>
             <span class="pill ${meta.dot}"><i></i>${meta.label}</span>
         </div>
         <div class="stat-row">
-            <div class="stat"><span class="stat-value">${summary.totalDps ? summary.totalDps.toLocaleString('en-US') : '—'}</span><span class="stat-label">total dps</span></div>
-            <div class="stat"><span class="stat-value">${summary.playerCount}</span><span class="stat-label">players</span></div>
-            <div class="stat"><span class="stat-value">${summary.iterationsLabel}</span><span class="stat-label">iterations</span></div>
+            <div class="stat"><span class="stat-value">${summary.backlog.toLocaleString('en-US')}</span><span class="stat-label">backlog</span></div>
+            <div class="stat"><span class="stat-value">${summary.currentIterations ?? '—'}</span><span class="stat-label">iterations</span></div>
+            <div class="stat"><span class="stat-value">${summary.latestTotalDps ? summary.latestTotalDps.toLocaleString('en-US') : '—'}</span><span class="stat-label">latest dps</span></div>
         </div>
         ${evokerRows ? `<div class="evokers">${evokerRows}</div>` : ''}
         <div class="activity-line">${activityLine}</div>
@@ -184,6 +192,7 @@ function htmlHandler(req, res) {
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.1rem; }
   .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.85rem; }
   .card-head h2 { font-size: 1rem; margin: 0; text-transform: capitalize; }
+  .card-head .boss { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }
   .pill { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; padding: 0.25rem 0.55rem; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
   .pill i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--muted); }
   .pill.ok i { background: var(--ok); }

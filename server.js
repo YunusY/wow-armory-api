@@ -15,36 +15,17 @@ if (!fs.existsSync(reportsDir)) {
 
 console.log(`Reports directory: ${reportsDir}`);
 
-const CYCLE_INTERVAL_MS = 5 * 60 * 1000;
-let cycleRunning = false;
-
-async function runCycleSafely() {
-    if (cycleRunning) {
-        console.warn('simTracker: previous cycle still running, skipping this tick');
-        return;
-    }
-    cycleRunning = true;
-    try {
-        await tracker.runAllGuildCycles();
-    } catch (error) {
-        console.error('simTracker: unexpected cycle error', error);
-    } finally {
-        cycleRunning = false;
-    }
-}
-
 tracker.load();
-runCycleSafely();
-const cycleTimer = setInterval(runCycleSafely, CYCLE_INTERVAL_MS);
+tracker.startWorker();
 
 let shuttingDown = false;
 async function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error(`${signal} received, shutting down gracefully`);
-    clearInterval(cycleTimer);
     try {
-        await tracker.persist();
+        await tracker.stopWorker(); // signals the loop, cancels an in-flight sim, awaits loop exit
+        await tracker.persist();    // final safety flush
     } catch (error) {
         console.error('flush on shutdown failed:', error);
     }

@@ -15,8 +15,7 @@ app.get('/api/status', status.jsonHandler);
 app.get('/status', status.htmlHandler);
 
 tracker.load();
-tracker.runAllGuildCycles().catch(e => console.error('initial cycle failed:', e));
-setInterval(() => tracker.runAllGuildCycles().catch(e => console.error('cycle failed:', e)), 5 * 60 * 1000);
+tracker.startWorker();
 
 app.listen(PORT, () => {
     console.log(`\n🚀 Local server running at: http://localhost:${PORT}`);
