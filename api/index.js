@@ -128,6 +128,10 @@ module.exports = async function handler(req, res) {
                         reportType: 'augmentation-multi',
                         iterations: simOptions.iterations,
                         seed: simOptions.seed,
+                        fightStyle: baseline.fightStyle,
+                        maxTime: baseline.maxTime,
+                        varyCombatLength: baseline.varyCombatLength,
+                        optimalRaid: baseline.optimalRaid,
                         baseline: {
                             totalDps: baseline.totalDps,
                             reportUrl: baseline.reportUrl,

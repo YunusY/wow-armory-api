@@ -16,6 +16,8 @@ function escapeHtml(value) {
 const EVENT_LABELS = {
     manifest_refreshed: 'manifest refreshed',
     manifest_refresh_failed: 'manifest refresh failed',
+    cutoff_probe: 'cutoff probe',
+    cutoff_discovered: 'cutoff discovered',
     pull_sim_started: 'pull sim started',
     pull_simmed: 'pull simmed',
     pull_sim_failed: 'pull sim failed',

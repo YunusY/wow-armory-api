@@ -6,7 +6,9 @@ A background worker continuously works through every historical pull for each tr
 
 ## Background worker (Mode 1)
 
-For each tracked guild: enumerate every boss in the raid tier (via raider.io's world raid-rankings — `lib/guilds.js`'s `raid`/`difficulty` config), fetch every pull ever recorded on each boss, merge and sort them chronologically, and sim whichever isn't simmed yet, oldest first — round-robining across the 3 guilds so all of them make steady progress. Every pull's result (per-player DPS, Augmentation Evoker contributions if any) is kept permanently in that guild's history.
+For each tracked guild: enumerate every boss in the raid tier (via raider.io's world raid-rankings — `lib/guilds.js`'s `raid`/`difficulty` config), fetch every pull recorded on each boss, merge and sort them chronologically, and sim whichever isn't simmed yet, oldest first — round-robining across the 3 guilds so all of them make steady progress. Every pull's result (per-player DPS, Augmentation Evoker contributions if any) is kept permanently in that guild's history.
+
+**Old-pull cutoff is auto-discovered, not hardcoded.** Old pulls can use a talent-tree layout that's incompatible with the current SimC build's talent data (a mid-tier talent rework breaks old exported hashes). The first time the worker sees a raid+difficulty it hasn't checked yet, it finds the boundary itself: 1-iteration test sims at ~10 evenly-spaced points across that guild's full pull history, then binary-search between the last failure and the end of history to narrow it down to a specific date. The result is cached (`state.cutoffs`, keyed by `raid:difficulty`) and shared across all 3 guilds — discovery only runs once per raid tier, not once per guild. If every sample succeeds, no cutoff is applied; if every sample fails, the result is inconclusive and isn't cached (retried on a later manifest refresh rather than guessing). `SIMC_MIN_PULL_DATE`, if set, is a manual override that skips discovery entirely. Pulls older than the (discovered or overridden) cutoff are dropped from the manifest, never attempted.
 
 Iterations scale down as the backlog grows, since a guild often starts with hundreds-to-thousands of un-simmed historical pulls: `iterations = 600` while backlog ≤ 3, otherwise `clamp(round(600 / 2^(backlog-3)), 15, 600)` — recomputed before every pull, so it ramps back up as the backlog drains and back down if new pulls arrive faster than they're processed. No HTML report is generated for these (would be tens of GB at this volume) — only raw DPS numbers are recorded.
 
@@ -28,7 +30,8 @@ Some historical pulls are permanently unsimmable (e.g. a talent-loadout hash fro
       "history": [
         {
           "pullId": "10370461", "boss": "midnight-falls", "pullStartedAt": "...", "simmedAt": "...",
-          "iterations": 200, "totalDps": 12345678, "playerCount": 18,
+          "iterations": 200, "fightStyle": "Patchwerk", "maxTime": 300, "varyCombatLength": 0.2, "optimalRaid": 1,
+          "totalDps": 12345678, "playerCount": 18,
           "players": [{ "name": "...", "realm": "...", "class": "...", "spec": "...", "ilevel": 675, "dps": 654321 }],
           "evokers": [{ "name": "...", "contribution": 12345 }]
         }
@@ -66,7 +69,9 @@ This **preempts the background worker**: if it's mid-sim on a pull when the requ
 
 `target_error` is not supported — it makes SimC run past the given `iterations` to converge, which would defeat the cap; `iterations` is the sole compute knob for both modes.
 
-Response shape: `{ reportId, reportUrl, iterations, totalDps, playerCount, players[] }`, or `{ reportType: 'augmentation-multi', iterations, seed, baseline: { totalDps, reportUrl, players[] }, evokers[] }` if the roster has an Augmentation Evoker (`baseline` = all evokers asleep; each `evokers[]` entry has `contribution` — personal evoker dps isn't meaningful on its own). This always generates a real, fresh one-off HTML report (random id).
+Both modes explicitly lock in `fight_style=Patchwerk`, `max_time=300`, `vary_combat_length=0.2`, `optimal_raid=1` (SimC's own effective defaults, made explicit so a future SimC version can't silently change what's being simulated) and report them back in the response — `fight_style=None` (SimC's literal unset-default label) isn't actually a settable value, so `Patchwerk` is used instead.
+
+Response shape: `{ reportId, reportUrl, iterations, fightStyle, maxTime, varyCombatLength, optimalRaid, totalDps, playerCount, players[] }`, or `{ reportType: 'augmentation-multi', iterations, seed, fightStyle, maxTime, varyCombatLength, optimalRaid, baseline: { totalDps, reportUrl, players[] }, evokers[] }` if the roster has an Augmentation Evoker (`baseline` = all evokers asleep; each `evokers[]` entry has `contribution` — personal evoker dps isn't meaningful on its own). This always generates a real, fresh one-off HTML report (random id).
 
 ## Plain-text `.simc` export
 
@@ -76,6 +81,6 @@ Errors return `{ "error": "..." }` with a 4xx/5xx status.
 
 ## Status
 
-`GET /api/status` — JSON: `{ now, log: [...] }`, a rolling log (newest first, up to 200 entries) of worker and on-demand activity. Each entry: `{ timestamp, event, detail }`. Events: `manifest_refreshed`, `manifest_refresh_failed`, `pull_sim_started`, `pull_simmed`, `pull_sim_failed` (with a `cancelled` flag when it was preempted by an on-demand request rather than a real failure), `pull_sim_skipped` (a pull that failed and was given up on immediately, no retry), `on_demand_started`, `on_demand_complete`, `on_demand_failed`. The tail of the log doubles as "what's happening right now" — a `pull_sim_started` for a guild with no matching `pull_simmed`/`pull_sim_failed` yet means that pull is still being simmed. Not persisted to disk — resets on restart, same as any live activity feed.
+`GET /api/status` — JSON: `{ now, log: [...] }`, a rolling log (newest first, up to 200 entries) of worker and on-demand activity. Each entry: `{ timestamp, event, detail }`. Events: `manifest_refreshed`, `manifest_refresh_failed`, `cutoff_probe` (one test sim during old-pull-cutoff discovery), `cutoff_discovered` (discovery finished for a raid+difficulty — `minPullDate` is a date, `null` if no cutoff was needed, or `'inconclusive'` if every sample failed), `pull_sim_started`, `pull_simmed`, `pull_sim_failed` (with a `cancelled` flag when it was preempted by an on-demand request rather than a real failure), `pull_sim_skipped` (a pull that failed and was given up on immediately, no retry), `on_demand_started`, `on_demand_complete`, `on_demand_failed`. The tail of the log doubles as "what's happening right now" — a `pull_sim_started` for a guild with no matching `pull_simmed`/`pull_sim_failed` yet means that pull is still being simmed. Not persisted to disk — resets on restart, same as any live activity feed.
 
 `GET /status` — the same data as a plain auto-refreshing (5s) HTML page, for checking on it from a browser. Per-guild cards show backlog size, current iteration level, and the latest simmed pull's DPS.
