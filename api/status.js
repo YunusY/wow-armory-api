@@ -95,7 +95,7 @@ function prettifySlug(slug) {
 }
 
 function renderGuildCard(guildKey, log) {
-    const view = tracker.getGuildView(guildKey, 1);
+    const view = tracker.getGuildView(guildKey, { limit: 1 });
     const activity = computeGuildActivity(guildKey, log, view);
     const summary = summarizeGuildView(view);
     const meta = STATE_META[activity.state];

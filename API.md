@@ -18,7 +18,13 @@ Some historical pulls are permanently unsimmable (e.g. a talent-loadout hash fro
 
 ## `sim=true`, cached mode (no other params)
 
-`GET /api/get-simc?sim=true` (or `simc=true`, `sim=1`, `simc=1`, `format=html`) — no other query params required. Optional `&limit=N` caps how many history entries come back per guild (omit for everything currently retained, up to `SIMC_MAX_HISTORY_PER_GUILD`, default 2000/guild). Always returns every tracked guild at once:
+`GET /api/get-simc?sim=true` (or `simc=true`, `sim=1`, `simc=1`, `format=html`) — no other query params required. Always returns every tracked guild at once. Optional filters, all applied to `history` (newest-first) per guild:
+
+| Param | Example | Notes |
+|---|---|---|
+| `limit` | `&limit=10` | caps how many history entries come back per guild (omit for everything currently retained, up to `SIMC_MAX_HISTORY_PER_GUILD`, default 2000/guild) |
+| `latest` | `&latest=true` | just the single newest pull per guild — equivalent to `limit=1`, overrides `limit` if both are given |
+| `since` | `&since=2026-04-25T00:00:00Z` | only pulls whose `pullStartedAt` is at or after this datetime (any string `Date` can parse — a bare date like `2026-04-25` works too). Invalid values return a 400. Composes with `limit`/`latest` (filter first, then cap) |
 
 ```json
 {

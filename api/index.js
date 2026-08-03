@@ -60,8 +60,20 @@ module.exports = async function handler(req, res) {
 
             const hasFullParams = raid && boss && difficulty && region && realm && guild;
             if (!hasFullParams) {
-                const limit = clean(req.query.limit);
-                return res.status(200).json({ guilds: tracker.getAllGuildsView(limit) });
+                const latest = req.query.latest === 'true' || req.query.latest === '1';
+                const sinceRaw = clean(req.query.since);
+                let since;
+                if (sinceRaw) {
+                    const sinceDate = new Date(sinceRaw);
+                    if (isNaN(sinceDate.getTime())) {
+                        return res.status(400).json({ error: `Invalid 'since' datetime: '${sinceRaw}'` });
+                    }
+                    since = sinceDate.toISOString();
+                }
+                // latest=true means "just the single newest pull" — overrides
+                // any numeric limit rather than combining with it.
+                const limit = latest ? 1 : clean(req.query.limit);
+                return res.status(200).json({ guilds: tracker.getAllGuildsView({ limit, since }) });
             }
 
             const tracked = getGuild(guild);
