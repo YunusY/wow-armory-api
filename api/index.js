@@ -61,19 +61,28 @@ module.exports = async function handler(req, res) {
             const hasFullParams = raid && boss && difficulty && region && realm && guild;
             if (!hasFullParams) {
                 const latest = req.query.latest === 'true' || req.query.latest === '1';
-                const sinceRaw = clean(req.query.since);
-                let since;
-                if (sinceRaw) {
-                    const sinceDate = new Date(sinceRaw);
-                    if (isNaN(sinceDate.getTime())) {
-                        return res.status(400).json({ error: `Invalid 'since' datetime: '${sinceRaw}'` });
+
+                const parseSinceParam = (raw, paramName) => {
+                    if (!raw) return undefined;
+                    const d = new Date(raw);
+                    if (isNaN(d.getTime())) {
+                        throw new Error(`Invalid '${paramName}' datetime: '${raw}'`);
                     }
-                    since = sinceDate.toISOString();
+                    return d.toISOString();
+                };
+
+                let sincePull, sinceSim;
+                try {
+                    sincePull = parseSinceParam(clean(req.query.sincePull), 'sincePull');
+                    sinceSim = parseSinceParam(clean(req.query.sinceSim), 'sinceSim');
+                } catch (err) {
+                    return res.status(400).json({ error: err.message });
                 }
+
                 // latest=true means "just the single newest pull" — overrides
                 // any numeric limit rather than combining with it.
                 const limit = latest ? 1 : clean(req.query.limit);
-                return res.status(200).json({ guilds: tracker.getAllGuildsView({ limit, since }) });
+                return res.status(200).json({ guilds: tracker.getAllGuildsView({ limit, sincePull, sinceSim }) });
             }
 
             const tracked = getGuild(guild);
@@ -140,6 +149,7 @@ module.exports = async function handler(req, res) {
                         reportType: 'augmentation-multi',
                         iterations: simOptions.iterations,
                         seed: simOptions.seed,
+                        simcVersion: baseline.simcVersion,
                         fightStyle: baseline.fightStyle,
                         maxTime: baseline.maxTime,
                         varyCombatLength: baseline.varyCombatLength,

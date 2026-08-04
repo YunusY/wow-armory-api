@@ -24,7 +24,10 @@ Some historical pulls are permanently unsimmable (e.g. a talent-loadout hash fro
 |---|---|---|
 | `limit` | `&limit=10` | caps how many history entries come back per guild (omit for everything currently retained, up to `SIMC_MAX_HISTORY_PER_GUILD`, default 2000/guild) |
 | `latest` | `&latest=true` | just the single newest pull per guild — equivalent to `limit=1`, overrides `limit` if both are given |
-| `since` | `&since=2026-04-25T00:00:00Z` | only pulls whose `pullStartedAt` is at or after this datetime (any string `Date` can parse — a bare date like `2026-04-25` works too). Invalid values return a 400. Composes with `limit`/`latest` (filter first, then cap) |
+| `sincePull` | `&sincePull=2026-04-25T00:00:00Z` | only pulls whose `pullStartedAt` (when the in-game attempt happened) is at or after this datetime |
+| `sinceSim` | `&sinceSim=2026-08-03T00:00:00Z` | only pulls whose `simmedAt` (when our worker finished processing it — set on skips too, not just successes) is at or after this datetime |
+
+`sincePull`/`sinceSim` accept any string `Date` can parse (a bare date like `2026-04-25` works too), can be combined with each other (both must hold) and with `limit`/`latest` (filters apply first, then cap). Invalid values return a 400.
 
 ```json
 {
@@ -36,7 +39,7 @@ Some historical pulls are permanently unsimmable (e.g. a talent-loadout hash fro
       "history": [
         {
           "pullId": "10370461", "boss": "midnight-falls", "pullStartedAt": "...", "simmedAt": "...",
-          "iterations": 200, "fightStyle": "Patchwerk", "maxTime": 300, "varyCombatLength": 0.2, "optimalRaid": 1,
+          "iterations": 200, "simcVersion": "1205-01", "fightStyle": "Patchwerk", "maxTime": 300, "varyCombatLength": 0.2, "optimalRaid": 1,
           "totalDps": 12345678, "playerCount": 18,
           "players": [{ "name": "...", "realm": "...", "class": "...", "spec": "...", "ilevel": 675, "dps": 654321 }],
           "evokers": [{ "name": "...", "contribution": 12345 }]
@@ -49,7 +52,7 @@ Some historical pulls are permanently unsimmable (e.g. a talent-loadout hash fro
 }
 ```
 
-`history` is newest-first. `evokers` is always an array — `[]` if that pull's roster had no Augmentation Evoker. `lastSimmedAt` only updates on a real successful sim; `lastActivityAt` updates on skips too (a guild grinding through a stretch of unsimmable pulls should still read as active, not stalled). A guild that hasn't simmed a single pull yet reads as `backlog: 0, history: []` rather than erroring (its manifest hasn't been fetched yet — check back shortly).
+`history` is newest-first. `evokers` is always an array — `[]` if that pull's roster had no Augmentation Evoker. `simcVersion` (and `fightStyle`/`maxTime`/`varyCombatLength`/`optimalRaid`) are `null` on a `failed: true` entry, since no sim actually ran. `lastSimmedAt` only updates on a real successful sim; `lastActivityAt` updates on skips too (a guild grinding through a stretch of unsimmable pulls should still read as active, not stalled). A guild that hasn't simmed a single pull yet reads as `backlog: 0, history: []` rather than erroring (its manifest hasn't been fetched yet — check back shortly).
 
 `report=<id>` still works for fetching a previously-generated HTML report by id, but Mode 1 no longer generates one for every pull — only Mode 2 (on-demand) requests produce a real report now.
 
@@ -75,9 +78,9 @@ This **preempts the background worker**: if it's mid-sim on a pull when the requ
 
 `target_error` is not supported — it makes SimC run past the given `iterations` to converge, which would defeat the cap; `iterations` is the sole compute knob for both modes.
 
-Both modes explicitly lock in `fight_style=Patchwerk`, `max_time=300`, `vary_combat_length=0.2`, `optimal_raid=1` (SimC's own effective defaults, made explicit so a future SimC version can't silently change what's being simulated) and report them back in the response — `fight_style=None` (SimC's literal unset-default label) isn't actually a settable value, so `Patchwerk` is used instead.
+Both modes explicitly lock in `fight_style=Patchwerk`, `max_time=300`, `vary_combat_length=0.2`, `optimal_raid=1` (SimC's own effective defaults, made explicit so a future SimC version can't silently change what's being simulated) and report them back in the response, along with `simcVersion` (SimC's own `version` field from its JSON output, e.g. `"1205-01"` — useful for knowing which build actually produced a given number) — `fight_style=None` (SimC's literal unset-default label) isn't actually a settable value, so `Patchwerk` is used instead.
 
-Response shape: `{ reportId, reportUrl, iterations, fightStyle, maxTime, varyCombatLength, optimalRaid, totalDps, playerCount, players[] }`, or `{ reportType: 'augmentation-multi', iterations, seed, fightStyle, maxTime, varyCombatLength, optimalRaid, baseline: { totalDps, reportUrl, players[] }, evokers[] }` if the roster has an Augmentation Evoker (`baseline` = all evokers asleep; each `evokers[]` entry has `contribution` — personal evoker dps isn't meaningful on its own). This always generates a real, fresh one-off HTML report (random id).
+Response shape: `{ reportId, reportUrl, iterations, simcVersion, fightStyle, maxTime, varyCombatLength, optimalRaid, totalDps, playerCount, players[] }`, or `{ reportType: 'augmentation-multi', iterations, seed, simcVersion, fightStyle, maxTime, varyCombatLength, optimalRaid, baseline: { totalDps, reportUrl, players[] }, evokers[] }` if the roster has an Augmentation Evoker (`baseline` = all evokers asleep; each `evokers[]` entry has `contribution` — personal evoker dps isn't meaningful on its own). This always generates a real, fresh one-off HTML report (random id).
 
 ## Plain-text `.simc` export
 
