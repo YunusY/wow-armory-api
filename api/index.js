@@ -13,10 +13,20 @@ module.exports = async function handler(req, res) {
     try {
         const clean = (val) => (val === 'undefined' || val === 'null' || val === '') ? undefined : val;
 
+        // Query param NAMES are matched case-insensitively (e.g. sincePull,
+        // sincepull, SincePull all work) — browsers/address-bar autocomplete
+        // can silently mangle casing (that's exactly what happened testing
+        // sincePull), and query params aren't a place callers expect
+        // case-sensitivity to matter.
+        const query = {};
+        for (const key of Object.keys(req.query)) {
+            query[key.toLowerCase()] = req.query[key];
+        }
+
         // -------------------------------------------------------------
         // Serve HTML Report if `?report=<ID>` parameter exists
         // -------------------------------------------------------------
-        let reportId = clean(req.query.report);
+        let reportId = clean(query.report);
         if (reportId) {
             // Prevent directory traversal attacks
             const safeReportId = path.basename(reportId).replace(/[^a-zA-Z0-9-]/g, '');
@@ -42,25 +52,27 @@ module.exports = async function handler(req, res) {
         // which cancels it) so the on-demand request doesn't wait behind it;
         // the worker just retries that same pull on its next pass.
         // -------------------------------------------------------------
-        const runSim = req.query.sim === 'true' ||
-             req.query.simc === 'true' ||
-             req.query.sim === '1' ||
-             req.query.simc === '1' ||
-             req.query.format === 'html';
+        const simVal = String(query.sim ?? '').toLowerCase();
+        const simcVal = String(query.simc ?? '').toLowerCase();
+        const formatVal = String(query.format ?? '').toLowerCase();
+        const runSim = simVal === 'true' || simVal === '1' ||
+             simcVal === 'true' || simcVal === '1' ||
+             formatVal === 'html';
 
         if (runSim) {
-            const raid = clean(req.query.raid);
-            const boss = clean(req.query.boss);
-            const difficulty = clean(req.query.difficulty);
-            const region = clean(req.query.region);
-            const realm = clean(req.query.realm);
-            const guild = clean(req.query.guild);
-            const period = clean(req.query.period);
-            let pullId = clean(req.query.pullId);
+            const raid = clean(query.raid);
+            const boss = clean(query.boss);
+            const difficulty = clean(query.difficulty);
+            const region = clean(query.region);
+            const realm = clean(query.realm);
+            const guild = clean(query.guild);
+            const period = clean(query.period);
+            let pullId = clean(query.pullid);
 
             const hasFullParams = raid && boss && difficulty && region && realm && guild;
             if (!hasFullParams) {
-                const latest = req.query.latest === 'true' || req.query.latest === '1';
+                const latestVal = String(query.latest ?? '').toLowerCase();
+                const latest = latestVal === 'true' || latestVal === '1';
 
                 const parseSinceParam = (raw, paramName) => {
                     if (!raw) return undefined;
@@ -73,15 +85,15 @@ module.exports = async function handler(req, res) {
 
                 let sincePull, sinceSim;
                 try {
-                    sincePull = parseSinceParam(clean(req.query.sincePull), 'sincePull');
-                    sinceSim = parseSinceParam(clean(req.query.sinceSim), 'sinceSim');
+                    sincePull = parseSinceParam(clean(query.sincepull), 'sincePull');
+                    sinceSim = parseSinceParam(clean(query.sincesim), 'sinceSim');
                 } catch (err) {
                     return res.status(400).json({ error: err.message });
                 }
 
                 // latest=true means "just the single newest pull" — overrides
                 // any numeric limit rather than combining with it.
-                const limit = latest ? 1 : clean(req.query.limit);
+                const limit = latest ? 1 : clean(query.limit);
                 return res.status(200).json({ guilds: tracker.getAllGuildsView({ limit, sincePull, sinceSim }) });
             }
 
@@ -105,12 +117,12 @@ module.exports = async function handler(req, res) {
                 // intentionally never passed here — it makes SimC keep
                 // running past `iterations` to converge, which would silently
                 // defeat the cap. iterations is the sole, exact compute knob.
-                const rawIterations = Number(req.query.iterations) || 100;
+                const rawIterations = Number(query.iterations) || 100;
                 const iterations = Math.min(1000, Math.max(1, rawIterations));
                 const simOptions = {
                     iterations,
-                    threads: Number(req.query.threads) || 1,
-                    statisticsLevel: req.query.statistics_level !== undefined ? Number(req.query.statistics_level) : 0,
+                    threads: Number(query.threads) || 1,
+                    statisticsLevel: query.statistics_level !== undefined ? Number(query.statistics_level) : 0,
                     // Shared across every sub-sim of this request so unrelated raid
                     // members roll identically each time - only the evoker(s)
                     // being awake/asleep should move the totals.
@@ -175,14 +187,14 @@ module.exports = async function handler(req, res) {
         // -------------------------------------------------------------
         // Plain-text .simc export — unchanged, still live per request
         // -------------------------------------------------------------
-        let raid = clean(req.query.raid);
-        let boss = clean(req.query.boss);
-        let difficulty = clean(req.query.difficulty);
-        let region = clean(req.query.region);
-        let realm = clean(req.query.realm);
-        let guild = clean(req.query.guild);
-        let period = clean(req.query.period);
-        let pullId = clean(req.query.pullId);
+        let raid = clean(query.raid);
+        let boss = clean(query.boss);
+        let difficulty = clean(query.difficulty);
+        let region = clean(query.region);
+        let realm = clean(query.realm);
+        let guild = clean(query.guild);
+        let period = clean(query.period);
+        let pullId = clean(query.pullid);
 
         const missingParams = [];
         if (!raid) missingParams.push("raid");
